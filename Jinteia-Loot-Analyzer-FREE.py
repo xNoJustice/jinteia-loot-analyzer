@@ -16,6 +16,45 @@ import json
 # Parsing and data structures
 # ---------------------------------------------------------------------------
 
+DUNGEONS = {
+    "Razador": {
+        "items": ["Truhe des Razador", "Razador's Chest"],
+        "color": "#7f1d1d",
+    },
+    "Nemere": {
+        "items": ["Truhe des Nemere", "Nemere's Chest"],
+        "color": "#1e3a8a",
+    },
+    "Jotun": {
+        "items": ["Truhe des Jotun Thrym", "Jotun Thrym's Chest"],
+        "color": "#14532d",
+    },
+    "Blue Death": {
+        "items": ["Truhe der Höllfenpforte", "Truhe der Höllenpforte", "Hellgates Chest"],
+        "color": "#0c4a6e",
+    },
+    "Natuhu": {
+        "items": ["Truhe des Eulen-König", "Chest of the Owl King"],
+        "color": "#581c87",
+    },
+    "Taliko": {
+        "items": ["Talikos Reichtum", "Taliko's Riches"],
+        "color": "#92400e",
+    },
+    "Affengott": {
+        "items": ["Affengottes Schatz", "Monkey God's Treasure"],
+        "color": "#065f46",
+    },
+    "Nalantir": {
+        "items": ["Nalantirs Vermächtnis", "Nalantir's Legacy"],
+        "color": "#4c1d95",
+    },
+    "Nozdormu": {
+        "items": ["Schatz der Dornen", "Treasure of Thorns"],
+        "color": "#991b1b",
+    },
+}
+
 LOG_LINE_RE = re.compile(
     r"\[(\d{2}/\d{2}/\d{2})\] \[(\d{2}:\d{2}:\d{2})\]: You receive (\d+) (.+?)\."
 )
@@ -127,9 +166,19 @@ class LiveMonitorWorker(threading.Thread):
         events_list = list(self.window)
         dropped_yang = sum(ev.quantity for ev in events_list if ev.is_yang)
         items_qty: Dict[str, int] = defaultdict(int)
+
+        # Track Dungeon Runs
+        dungeon_runs = defaultdict(int)
+        total_runs = 0
+
         for ev in events_list:
             if not ev.is_yang:
                 items_qty[ev.item] += ev.quantity
+                # Check if item belongs to a dungeon chest
+                for d_name, d_data in DUNGEONS.items():
+                    if ev.item in d_data["items"]:
+                        dungeon_runs[d_name] += ev.quantity
+                        total_runs += ev.quantity
 
         start = events_list[0].ts
         end = events_list[-1].ts
@@ -162,6 +211,8 @@ class LiveMonitorWorker(threading.Thread):
             "yang_per_hour": int(round(dropped_yang / hours)),
             "yang_per_minute": int(round(dropped_yang / minutes)),
             "items": items_list,
+            "dungeon_runs": dict(dungeon_runs),
+            "total_dungeon_runs": total_runs
         }
         return stats
 
@@ -224,7 +275,7 @@ class LootMonitorApp(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title("💰 Jinteia Loot Analyzer [AI Slop by Paysami] - Real-time Yang & Loot Tracker - Download only from there: https://github.com/PaysamiKekW/Jinteia-Loot-Analyzer-FREE/")
+        self.title("💰 Jinteia Real-time Yang & Loot Tracker")
         self.geometry("700x800")
 
         # Set dark theme colors
@@ -252,6 +303,9 @@ class LootMonitorApp(tk.Tk):
         self.style.configure("Stats.TLabel", font=("Segoe UI", 18, "bold"), foreground=self.accent_secondary)
 
         # Button styles
+        self.style.configure("TNotebook", background=self.bg_color, borderwidth=0)
+        self.style.configure("TNotebook.Tab", background=self.card_bg, foreground=self.text_color, padding=[10, 5])
+        self.style.map("TNotebook.Tab", background=[("selected", self.accent_secondary)], foreground=[("selected", "white")])
         self.style.configure("Accent.TButton", background=self.accent_color, foreground="white",
                            font=("Segoe UI", 10, "bold"), borderwidth=0, padding=10)
         self.style.map("Accent.TButton",
@@ -282,102 +336,47 @@ class LootMonitorApp(tk.Tk):
     # -------------------- UI layout -------------------- #
 
     def create_widgets(self):
-        # Create a main container with padding
-        main_container = ttk.Frame(self)
-        main_container.pack(fill="both", expand=True, padx=10, pady=10)
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Settings Card
-        settings_card = tk.Frame(main_container, bg=self.card_bg, relief="flat", borderwidth=0)
-        settings_card.pack(fill="x", pady=(0, 5))
+        # --- TAB 1: DASHBOARD ---
+        self.tab_main = tk.Frame(self.notebook, bg=self.bg_color)
+        self.notebook.add(self.tab_main, text=" 🎮 Dashboard ")
+
+        # Controls Card
+        controls_card = tk.Frame(self.tab_main, bg=self.card_bg, relief="flat", borderwidth=0)
+        controls_card.pack(fill="x", pady=(0, 5))
 
         # --- Updated Settings Header with Log Selection ---
-        settings_header = tk.Frame(settings_card, bg=self.card_bg)
-        settings_header.pack(fill="x", padx=20, pady=(15, 5))
+        controls_header = tk.Frame(controls_card, bg=self.card_bg)
+        controls_header.pack(fill="x", padx=20, pady=(15, 5))
 
-        # Title on the left
-        tk.Label(settings_header, text="⚙️ Settings", bg=self.card_bg, fg=self.text_color,
+        tk.Label(controls_header, text="Controls", bg=self.card_bg, fg=self.text_color,
                 font=("Segoe UI", 11, "bold")).pack(side="left")
 
-        # Log selection on the right
-        # We wrap these in a sub-frame to keep them grouped together on the right
-        log_sel_frame = tk.Frame(settings_header, bg=self.card_bg)
-        log_sel_frame.pack(side="right")
+        # Controls content
+        controls_content = tk.Frame(controls_card, bg=self.card_bg)
+        controls_content.pack(fill="x", padx=20, pady=(0, 20))
 
-        ttk.Button(log_sel_frame, text="Browse", command=self.browse_file,
-                  style="Secondary.TButton").pack(side="right", padx=(5, 0))
+        # Control buttons
+        control_buttons = tk.Frame(controls_content, bg=self.card_bg)
+        control_buttons.pack(fill="x", pady=(15, 0))
 
-        self.log_path_var = tk.StringVar(value="info_chat_loot.log")
-        log_entry = tk.Entry(log_sel_frame, textvariable=self.log_path_var, bg="#2d3748", fg=self.text_color,
-                           insertbackground=self.text_color, font=("Segoe UI", 9),
-                           relief="flat", width=45) # Reduced width to fit header
-        log_entry.pack(side="right", padx=5)
-
-        tk.Label(log_sel_frame, text="Log File:", bg=self.card_bg, fg=self.muted_text,
-                font=("Segoe UI", 9)).pack(side="right")
-        # Settings content
-        settings_content = tk.Frame(settings_card, bg=self.card_bg)
-        settings_content.pack(fill="x", padx=20, pady=(0, 20))
-
-        # Row 2: Settings controls
-        row2 = tk.Frame(settings_content, bg=self.card_bg)
-        row2.pack(fill="x", pady=8)
-
-        tk.Label(row2, text="Window:", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 10)).pack(side="left")
-        self.window_minutes_var = tk.IntVar(value=120)
-        window_spin = tk.Spinbox(row2, from_=1, to=600, textvariable=self.window_minutes_var,
-                                bg="#2d3748", fg=self.text_color, insertbackground=self.text_color,
-                                font=("Segoe UI", 10), relief="flat", width=8)
-        window_spin.pack(side="left", padx=(10, 20))
-
-        tk.Label(row2, text="minutes", bg=self.card_bg, fg=self.muted_text,
-                font=("Segoe UI", 9)).pack(side="left")
-
-        tk.Label(row2, text="Refresh:", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 10)).pack(side="left", padx=(20, 0))
-        self.refresh_secs_var = tk.IntVar(value=2)
-        refresh_spin = tk.Spinbox(row2, from_=1, to=60, textvariable=self.refresh_secs_var,
-                                 bg="#2d3748", fg=self.text_color, insertbackground=self.text_color,
-                                 font=("Segoe UI", 10), relief="flat", width=8)
-        refresh_spin.pack(side="left", padx=(10, 20))
-
-        tk.Label(row2, text="seconds", bg=self.card_bg, fg=self.muted_text,
-                font=("Segoe UI", 9)).pack(side="left")
-
-        # From start checkbox
-        self.from_start_var = tk.BooleanVar(value=False)
-        from_start_check = tk.Checkbutton(row2, text="Read from beginning",
-                                         variable=self.from_start_var,
-                                         bg=self.card_bg, fg=self.text_color,
-                                         selectcolor=self.card_bg,
-                                         activebackground=self.card_bg,
-                                         activeforeground=self.text_color,
-                                         font=("Segoe UI", 10))
-        from_start_check.pack(side="left", padx=(20, 0))
-
-        # Row 3: Control buttons
-        row3 = tk.Frame(settings_content, bg=self.card_bg)
-        row3.pack(fill="x", pady=(15, 0))
-
-        self.start_button = ttk.Button(row3, text="▶ Start Monitoring",
+        self.start_button = ttk.Button(control_buttons, text="▶ Start Monitoring",
                                       command=self.start_monitor, style="Accent.TButton")
         self.start_button.pack(side="left", padx=(0, 10))
 
-        self.stop_button = ttk.Button(row3, text="⏹ Stop",
+        self.stop_button = ttk.Button(control_buttons, text="⏹ Stop",
                                      command=self.stop_monitor, style="Secondary.TButton",
                                      state="disabled")
         self.stop_button.pack(side="left")
 
-        self.price_button = ttk.Button(row3, text="🏷️ Edit Prices",
-                                     command=self.open_price_editor, style="Secondary.TButton")
-        self.price_button.pack(side="left", padx=10)
-
-        self.mini_btn = ttk.Button(row3, text="📱 Mini Mode",
+        self.mini_btn = ttk.Button(control_buttons, text="📱 Mini Mode",
                                   command=self.toggle_mini_window, style="Secondary.TButton")
         self.mini_btn.pack(side="left", padx=10)
 
         # Stats Dashboard
-        stats_card = tk.Frame(main_container, bg=self.card_bg, relief="flat", borderwidth=0)
+        stats_card = tk.Frame(self.tab_main, bg=self.card_bg, relief="flat", borderwidth=0)
         stats_card.pack(fill="x", pady=(0, 5))
 
         # Stats header
@@ -423,8 +422,18 @@ class LootMonitorApp(tk.Tk):
         self.material_value_label = add_stat_row("Total Items Value:", 5, "#a855f7") # Purple color for profit
         self.material_value_label.config(font=("Segoe UI", 11, "bold"))
 
+        # --- DUNGEON BLOCKS (NEW) ---
+        dungeon_container = tk.Frame(self.tab_main, bg=self.bg_color, pady=10)
+        dungeon_container.pack(fill="x", padx=10)
+
+        tk.Label(dungeon_container, text="🏰 Dungeon Runs", bg=self.bg_color, fg=self.muted_text, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10)
+
+        # The frame that will hold the dynamic blocks
+        self.dungeon_blocks = tk.Frame(dungeon_container, bg=self.bg_color)
+        self.dungeon_blocks.pack(fill="x", pady=5)
+
         # Loot Items Table
-        loot_card = tk.Frame(main_container, bg=self.card_bg, relief="flat", borderwidth=0)
+        loot_card = tk.Frame(self.tab_main, bg=self.card_bg, relief="flat", borderwidth=0)
         loot_card.pack(fill="both", expand=True)
 
         # Loot header
@@ -447,23 +456,12 @@ class LootMonitorApp(tk.Tk):
         tree_container = tk.Frame(loot_card, bg=self.card_bg)
         tree_container.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
-        columns = ("bookmark", "item", "quantity", "per_hour", "total")
-        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=8)
-
-        # Configure columns
-        self.tree.heading("bookmark", text="⭐", anchor="center")
-        self.tree.heading("item", text="Item Name", anchor="w")
-        self.tree.heading("quantity", text="Quantity", anchor="center")
-        self.tree.heading("per_hour", text="Quantity / Hour", anchor="center")
-        self.tree.heading("total", text="Total", anchor="center")
-
-        self.tree.column("bookmark", width=40, anchor="center")
-        self.tree.column("item", width=150, anchor="w")
-        self.tree.column("quantity", width=100, anchor="center")
-        self.tree.column("per_hour", width=100, anchor="center")
-        self.tree.column("total", width=150, anchor="center")
-
-        self.tree.bind("<Button-1>", self.on_click_handler)
+        self.tree = ttk.Treeview(tree_container, columns=("star", "item", "qty", "hr", "val"), show="headings")
+        for col, txt in zip(self.tree["columns"], ("⭐", "Item Name", "Quantity", "Qty/h", "Total Value")):
+            self.tree.heading(col, text=txt)
+            self.tree.column(col, width=40 if col=="star" else 120, anchor="center" if col!="item" else "w")
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Button-1>", self.on_tree_click)
 
         # Scrollbars
         vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
@@ -484,6 +482,153 @@ class LootMonitorApp(tk.Tk):
                                   anchor="w", bg="#1e293b", fg=self.muted_text,
                                   font=("Segoe UI", 9), padx=10, pady=2)
         self.status_bar.pack(side="bottom", fill="x")
+
+        # --- TAB 2: SETTINGS ---
+
+        self.tab_settings = tk.Frame(self.notebook, bg=self.bg_color, relief="flat", borderwidth=0)
+        self.notebook.add(self.tab_settings, text=" ⚙️ Settings ")
+
+        # Controls content
+        settings_content = tk.Frame(self.tab_settings, bg=self.card_bg)
+        settings_content.pack(fill="x", padx=20, pady=(0, 20))
+
+        settings_header = tk.Frame(settings_content, bg=self.card_bg, pady=10)
+        settings_header.pack(fill="x", padx=20, pady=(15, 5))
+
+        # Title on the left
+        tk.Label(settings_header, text="⚙️ Settings", bg=self.card_bg, fg=self.text_color,
+                font=("Segoe UI", 11, "bold")).pack(side="left")
+
+        # Log selection on the right
+        # We wrap these in a sub-frame to keep them grouped together on the right
+        log_sel_frame = tk.Frame(settings_header, bg=self.card_bg)
+        log_sel_frame.pack(side="right")
+
+        ttk.Button(log_sel_frame, text="Browse", command=self.browse_file,
+                  style="Secondary.TButton").pack(side="right", padx=(5, 0))
+
+        self.log_path_var = tk.StringVar(value="info_chat_loot.log")
+        log_entry = tk.Entry(log_sel_frame, textvariable=self.log_path_var, bg="#2d3748", fg=self.text_color,
+                           insertbackground=self.text_color, font=("Segoe UI", 9),
+                           relief="flat", width=45) # Reduced width to fit header
+        log_entry.pack(side="right", padx=5)
+
+        tk.Label(log_sel_frame, text="Log File:", bg=self.card_bg, fg=self.muted_text,
+                font=("Segoe UI", 9)).pack(side="right")
+
+        # Settings controls
+        settings_controls = tk.Frame(settings_content, bg=self.card_bg)
+        settings_controls.pack(fill="x", pady=8)
+
+        tk.Label(settings_controls, text="Window:", bg=self.card_bg, fg=self.text_color,
+                font=("Segoe UI", 10)).pack(side="left")
+        self.window_minutes_var = tk.IntVar(value=120)
+        window_spin = tk.Spinbox(settings_controls, from_=1, to=600, textvariable=self.window_minutes_var,
+                                bg="#2d3748", fg=self.text_color, insertbackground=self.text_color,
+                                font=("Segoe UI", 10), relief="flat", width=8)
+        window_spin.pack(side="left", padx=(10, 20))
+
+        tk.Label(settings_controls, text="minutes", bg=self.card_bg, fg=self.muted_text,
+                font=("Segoe UI", 9)).pack(side="left")
+
+        tk.Label(settings_controls, text="Refresh:", bg=self.card_bg, fg=self.text_color,
+                font=("Segoe UI", 10)).pack(side="left", padx=(20, 0))
+        self.refresh_secs_var = tk.IntVar(value=3)
+        refresh_spin = tk.Spinbox(settings_controls, from_=1, to=60, textvariable=self.refresh_secs_var,
+                                 bg="#2d3748", fg=self.text_color, insertbackground=self.text_color,
+                                 font=("Segoe UI", 10), relief="flat", width=8)
+        refresh_spin.pack(side="left", padx=(10, 20))
+
+        tk.Label(settings_controls, text="seconds", bg=self.card_bg, fg=self.muted_text,
+                font=("Segoe UI", 9)).pack(side="left")
+
+        # From start checkbox
+        self.from_start_var = tk.BooleanVar(value=False)
+        from_start_check = tk.Checkbutton(settings_controls, text="Read from beginning",
+                                         variable=self.from_start_var,
+                                         bg=self.card_bg, fg=self.text_color,
+                                         selectcolor=self.card_bg,
+                                         activebackground=self.card_bg,
+                                         activeforeground=self.text_color,
+                                         font=("Segoe UI", 10))
+        from_start_check.pack(side="left", padx=(20, 0))
+
+        # --- TAB 3: MARKET PRICES ---
+        self.tab_market = tk.Frame(self.notebook, bg=self.bg_color)
+        self.notebook.add(self.tab_market, text=" 🏷️ Market Prices ")
+
+        # Header & Search
+        header = tk.Frame(self.tab_market, bg=self.card_bg, pady=10)
+        header.pack(fill="x")
+        tk.Label(header, text="Market Price Editor", bg=self.card_bg, fg=self.accent_color, font=("Segoe UI", 12, "bold")).pack()
+
+        search_frame = tk.Frame(self.tab_market, bg=self.bg_color, pady=10)
+        search_frame.pack(fill="x", padx=20)
+        tk.Label(search_frame, text="🔍 Search:", bg=self.bg_color, fg=self.text_color).pack(side="left")
+        self.price_search_var = tk.StringVar()
+        self.price_search_var.trace_add("write", lambda *a: self.render_price_list(self.price_search_var.get()))
+        tk.Entry(search_frame, textvariable=self.price_search_var, bg="#2d3748", fg="white", relief="flat").pack(side="left", fill="x", expand=True, padx=10)
+
+        # Scrollable View
+        container = tk.Frame(self.tab_market, bg="#2d3748", bd=1, relief="flat")
+        container.pack(fill="both", expand=True, padx=20, pady=10)
+
+        self.price_canvas = tk.Canvas(container, bg=self.bg_color, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.price_canvas.yview)
+        self.scrollable_frame = tk.Frame(self.price_canvas, bg=self.bg_color)
+
+        # Fix Scroll: Bind mousewheel ONLY when mouse is over the price list
+        def _on_mousewheel(event):
+            self.price_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+        self.price_canvas.bind("<Enter>", lambda e: self.price_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self.price_canvas.bind("<Leave>", lambda e: self.price_canvas.unbind_all("<MouseWheel>"))
+
+        self.price_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=400)
+        self.price_canvas.configure(yscrollcommand=scrollbar.set)
+        self.price_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Initialize the list
+        self.row_widgets = []
+        self.render_price_list()
+
+    def render_price_list(self, filter_text=""):
+        # Safety check for initialization
+        if not hasattr(self, 'scrollable_frame') or not hasattr(self, 'row_widgets'):
+            self.row_widgets = []
+            return
+
+        # 1. Clear current rows
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        self.row_widgets.clear()
+
+        # 2. Render filtered items
+        for name, price in self.price_db.items():
+            if filter_text.lower() in name.lower():
+                f = tk.Frame(self.scrollable_frame, bg=self.bg_color, pady=5)
+                f.pack(fill="x", padx=5)
+
+                tk.Label(f, text=name, bg=self.bg_color, fg=self.text_color,
+                         width=25, anchor="w", font=("Segoe UI", 10)).pack(side="left")
+
+                var = tk.StringVar(value=str(price))
+                var.trace_add("write", lambda *args, n=name, v=var: self.on_price_change(n, v))
+
+                e = tk.Entry(f, textvariable=var, bg="#16213e", fg=self.accent_secondary,
+                             width=12, justify="center", relief="flat", font=("Segoe UI", 10, "bold"))
+                e.pack(side="right", padx=5)
+
+                self.row_widgets.append((name, var))
+
+        # 3. CRITICAL FIX FOR SEARCH: Update canvas scroll area
+        self.scrollable_frame.update_idletasks()
+        self.price_canvas.configure(scrollregion=self.price_canvas.bbox("all"))
+
+        # Reset scroll to top when searching so results are visible
+        if filter_text:
+            self.price_canvas.yview_moveto(0)
 
     def toggle_mini_window(self):
         """Toggles the mini window on and off."""
@@ -521,6 +666,34 @@ class LootMonitorApp(tk.Tk):
         self.mini_min = tk.Label(self.mini_win, text="Yang/m: 0", fg="#f59e0b", bg="#1a1a2e", font=("Segoe UI", 10))
         self.mini_min.pack()
 
+    def create_dungeon_block(self, parent, name, count, bg):
+        """Creates a styled card for a dungeon run."""
+        frame = tk.Frame(parent, bg=bg, padx=12, pady=8, highlightthickness=1, highlightbackground="#374151")
+        tk.Label(frame, text=name.upper(), bg=bg, fg=self.text_color, font=("Segoe UI", 8, "bold")).pack()
+        tk.Label(frame, text=str(count), bg=bg, fg="white", font=("Segoe UI", 14, "bold")).pack()
+        return frame
+
+    def render_dungeon_blocks(self, stats):
+        # Clear old blocks
+        for widget in self.dungeon_blocks.winfo_children():
+            widget.destroy()
+
+        dungeon_data = stats.get("dungeon_runs", {})
+        total_runs = stats.get("total_dungeon_runs", 0)
+
+        if total_runs == 0:
+            self.create_dungeon_block(self.dungeon_blocks, "No Runs", 0, self.card_bg).pack(side="left", padx=5)
+        else:
+            # Render Total Block
+            self.create_dungeon_block(self.dungeon_blocks, "Total", total_runs, "#374151").pack(side="left", padx=5)
+
+            # Render Individual Dungeons (Sorted by name)
+            for name in DUNGEONS.keys():
+              if name in dungeon_data:
+                  color = DUNGEONS[name]["color"]
+                  count = dungeon_data[name]
+                  self.create_dungeon_block(self.dungeon_blocks, name, count, color).pack(side="left", padx=2)
+
     # -------------------- UI helpers -------------------- #
 
     def reset_stats_ui(self):
@@ -554,108 +727,21 @@ class LootMonitorApp(tk.Tk):
           with open(path, "w", encoding="utf-8") as f:
               json.dump(self.price_db, f, indent=4)
 
-    def open_price_editor(self):
-        editor = tk.Toplevel(self)
-        editor.title("🏷️ Price Database")
-        editor.geometry("450x600")
-        editor.configure(bg=self.bg_color)
-        editor.transient(self)
-        editor.grab_set() # Forces focus on this window
+    def on_price_change(self, name, var):
+        """Update database and file immediately on keystroke."""
+        try:
+            new_val = int(var.get())
+            self.price_db[name] = new_val
+            # Update the worker's DB so the next calculation uses the new price
+            if self.worker:
+                self.worker.price_db = self.price_db
+            self.save_data()
+        except ValueError:
+            pass # Ignore non-numeric input during typing
 
-        # --- Header ---
-        header = tk.Frame(editor, bg=self.card_bg, pady=15)
-        header.pack(fill="x")
-        tk.Label(header, text="Market Price Editor", bg=self.card_bg, fg=self.accent_color,
-                font=("Segoe UI", 14, "bold")).pack()
-        tk.Label(header, text="Changes apply to Net Worth calculations",
-                bg=self.card_bg, fg=self.muted_text, font=("Segoe UI", 9)).pack()
-
-        # --- Search Box ---
-        search_frame = tk.Frame(editor, bg=self.bg_color, pady=10)
-        search_frame.pack(fill="x", padx=20)
-        tk.Label(search_frame, text="🔍 Search:", bg=self.bg_color, fg=self.text_color).pack(side="left")
-        search_var = tk.StringVar()
-        search_entry = tk.Entry(search_frame, textvariable=search_var, bg="#2d3748",
-                                fg="white", insertbackground="white", relief="flat")
-        search_entry.pack(side="left", fill="x", expand=True, padx=(10, 0))
-
-        # --- Scrollable Area Container ---
-        # We use a frame with a specific height to act as the viewport
-        container = tk.Frame(editor, bg="#2d3748", bd=1, relief="flat")
-        container.pack(fill="both", expand=True, padx=20, pady=10)
-
-        canvas = tk.Canvas(container, bg=self.bg_color, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg=self.bg_color)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=380)
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        # Mousewheel support
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
-        row_widgets = []
-
-        def render_list(filter_text=""):
-            # Clear current rows
-            for widget in scrollable_frame.winfo_children():
-                widget.destroy()
-            row_widgets.clear()
-
-            canvas.yview_moveto(0)
-
-            for name, price in self.price_db.items():
-                if filter_text.lower() in name.lower():
-                    f = tk.Frame(scrollable_frame, bg=self.bg_color, pady=5)
-                    f.pack(fill="x", padx=5)
-
-                    # Item Name Label
-                    tk.Label(f, text=name, bg=self.bg_color, fg=self.text_color,
-                            font=("Segoe UI", 10), width=25, anchor="w").pack(side="left")
-
-                    # Price Entry
-                    var = tk.StringVar(value=str(price))
-                    e = tk.Entry(f, textvariable=var, bg="#16213e", fg=self.accent_secondary,
-                                font=("Segoe UI", 10, "bold"), width=12, relief="flat", justify="center")
-                    e.pack(side="right", padx=5)
-                    row_widgets.append((name, var))
-
-        # Bind search logic
-        search_var.trace_add("write", lambda *args: render_list(search_var.get()))
-
-        # Initial render
-        render_list()
-
-        # --- Footer Action ---
-        def save_and_close():
-            # Update local db from all variables (even hidden ones)
-            # Note: In a real search scenario, we'd store all vars in a master dict
-            for name, var in row_widgets:
-                try:
-                    self.price_db[name] = int(var.get())
-                except: continue
-
-            with open("prices.json", "w", encoding="utf-8") as f:
-                json.dump(self.price_db, f, indent=4)
-
-            self.update_status("Prices updated successfully.")
-            canvas.unbind_all("<MouseWheel>") # Clean up binding
-            editor.destroy()
-
-        btn_frame = tk.Frame(editor, bg=self.bg_color, pady=15)
-        btn_frame.pack(fill="x")
-        ttk.Button(btn_frame, text="✅ Save & Apply", style="Accent.TButton",
-                  command=save_and_close).pack()
+    def save_data(self):
+        with open("prices.json", "w") as f: json.dump(self.price_db, f)
+        with open("bookmarks.json", "w") as f: json.dump(list(self.bookmarks), f)
 
     def refresh_treeview_filtered(self):
         if not self.last_received_stats:
@@ -706,16 +792,7 @@ class LootMonitorApp(tk.Tk):
           except Exception as e:
               print(f"Error loading bookmarks: {e}")
 
-    def save_bookmarks(self):
-        """Save the current set of bookmarks to bookmarks.json."""
-        try:
-            with open("bookmarks.json", "w", encoding="utf-8") as f:
-                # Convert set to list for JSON compatibility
-                json.dump(list(self.bookmarks), f, indent=4)
-        except Exception as e:
-            print(f"Error saving bookmarks: {e}")
-
-    def on_click_handler(self, event):
+    def on_tree_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
         column = self.tree.identify_column(event.x)
         item_id = self.tree.identify_row(event.y)
@@ -733,7 +810,7 @@ class LootMonitorApp(tk.Tk):
             else:
                 self.bookmarks.add(item_name)
 
-            self.save_bookmarks()
+            self.save_data()
             self.refresh_last_stats()
 
     # -------------------- UI callbacks -------------------- #
@@ -816,15 +893,6 @@ class LootMonitorApp(tk.Tk):
             self.stop_monitor()
             return
 
-        if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
-            try:
-                self.mini_yang.config(text=f"Yang: {dropped_yang:,}")
-                self.mini_hr.config(text=f"Yang/h: {yang_per_hour:,}")
-                self.mini_min.config(text=f"Yang/m: {yang_per_minute:,}")
-            except Exception:
-                # This catches cases where winfo_exists was true but the widget was mid-destruction
-                pass
-
         start = stats["start"]
         end = stats["end"]
         hours = stats["hours"]
@@ -834,15 +902,36 @@ class LootMonitorApp(tk.Tk):
         yang_per_minute = stats["yang_per_minute"]
         items_list = stats["items"]
 
+        if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
+            try:
+                self.mini_yang.config(text=f"Yang: {dropped_yang:,}")
+                self.mini_hr.config(text=f"Yang/h: {yang_per_hour:,}")
+                self.mini_min.config(text=f"Yang/m: {yang_per_minute:,}")
+            except Exception:
+                # This catches cases where winfo_exists was true but the widget was mid-destruction
+                pass
+
         # Update time info
+        if start.date() != end.date():
+            # Shows: 24/11 22:30:05 -> 25/11 01:15:00
+            time_str = f"{start.strftime('%d/%m %H:%M:%S')} → {end.strftime('%d/%m %H:%M:%S')}"
+        else:
+            # Standard view for single-day sessions
+            time_str = f"{start.strftime('%H:%M:%S')} → {end.strftime('%H:%M:%S')}"
+
         self.interval_label.config(
-            text=f"{start.strftime('%H:%M:%S')} → {end.strftime('%H:%M:%S')}",
+            text=time_str,
             fg=self.text_color
         )
-        self.window_length_label.config(
-            text=f"{hours:.2f} h ({minutes:.1f} min)",
-            fg=self.text_color
-        )
+
+        if hours >= 24:
+            days = int(hours // 24)
+            rem_hours = hours % 24
+            window_txt = f"{days} Days {rem_hours:.1f} Hours ({stats['minutes']:.1f} Minutes)"
+        else:
+            window_txt = f"{hours:.2f} Hours ({stats['minutes']:.1f} Minutes)"
+
+        self.window_length_label.config(text=window_txt, fg=self.text_color)
 
         # Calculate Material Value
         material_value = sum(item[3] for item in stats["items"])
@@ -852,6 +941,9 @@ class LootMonitorApp(tk.Tk):
         self.yang_per_hour_label.config(text=f"{yang_per_hour:,} Yang")
         self.yang_per_minute_label.config(text=f"{yang_per_minute:,} Yang")
         self.material_value_label.config(text=f"{material_value:,} Yang")
+
+        # Render the dynamic Dungeon blocks
+        self.render_dungeon_blocks(stats)
 
         # Update items tree
         self.tree.delete(*self.tree.get_children())
@@ -875,18 +967,15 @@ class LootMonitorApp(tk.Tk):
         self.tree.tag_configure('evenrow', background='#2d3748', foreground=self.text_color)
         self.tree.tag_configure('oddrow', background='#374151', foreground=self.text_color)
 
-        # Check for items not in our price database
-        prices_changed = False
-        for item_tuple in stats["items"]:
-            item_name = item_tuple[0]
-            if item_name not in self.price_db:
-                self.price_db[item_name] = 0 # Default price for new item
-                prices_changed = True
-
-        if prices_changed:
-            # Save the new items to the JSON file automatically
-            with open("prices.json", "w", encoding="utf-8") as f:
-                json.dump(self.price_db, f, indent=4)
+        # Check for new items to add to price DB
+        new_item = False
+        for item in stats['items']:
+            if item[0] not in self.price_db:
+                self.price_db[item[0]] = 0
+                new_item = True
+        if new_item:
+            self.render_price_list()
+            self.save_data()
 
         self.refresh_treeview_filtered()
 
