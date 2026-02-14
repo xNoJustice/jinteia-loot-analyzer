@@ -612,6 +612,8 @@ class LootMonitorApp(tk.Tk):
                 widget.destroy()
             row_widgets.clear()
 
+            canvas.yview_moveto(0)
+
             for name, price in self.price_db.items():
                 if filter_text.lower() in name.lower():
                     f = tk.Frame(scrollable_frame, bg=self.bg_color, pady=5)
@@ -817,8 +819,8 @@ class LootMonitorApp(tk.Tk):
         if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
             try:
                 self.mini_yang.config(text=f"Yang: {dropped_yang:,}")
-                self.mini_hr.config(text=f"Hr: {yang_per_hour:,}")
-                self.mini_min.config(text=f"Min: {yang_per_minute:,}")
+                self.mini_hr.config(text=f"Yang/h: {yang_per_hour:,}")
+                self.mini_min.config(text=f"Yang/m: {yang_per_minute:,}")
             except Exception:
                 # This catches cases where winfo_exists was true but the widget was mid-destruction
                 pass
