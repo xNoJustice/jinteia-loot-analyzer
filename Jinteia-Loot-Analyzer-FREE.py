@@ -11,6 +11,7 @@ from typing import Optional, Iterable, List, Deque, Dict, Tuple
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import json
+import math
 
 # ---------------------------------------------------------------------------
 # Parsing and data structures
@@ -423,13 +424,13 @@ class LootMonitorApp(tk.Tk):
         self.material_value_label.config(font=("Segoe UI", 11, "bold"))
 
         # --- DUNGEON BLOCKS (NEW) ---
-        dungeon_container = tk.Frame(self.tab_main, bg=self.bg_color, pady=10)
+        dungeon_container = tk.Frame(self.tab_main, bg=self.card_bg, pady=10)
         dungeon_container.pack(fill="x", padx=10)
 
-        tk.Label(dungeon_container, text="🏰 Dungeon Runs", bg=self.bg_color, fg=self.muted_text, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=10)
+        tk.Label(dungeon_container, text="🏰 Dungeon Runs", bg=self.card_bg, fg=self.text_color, font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10)
 
         # The frame that will hold the dynamic blocks
-        self.dungeon_blocks = tk.Frame(dungeon_container, bg=self.bg_color)
+        self.dungeon_blocks = tk.Frame(dungeon_container, bg=self.card_bg)
         self.dungeon_blocks.pack(fill="x", pady=5)
 
         # Loot Items Table
@@ -813,6 +814,30 @@ class LootMonitorApp(tk.Tk):
             self.save_data()
             self.refresh_last_stats()
 
+    def format_yang_short(self, amount):
+        # Handle zero or negative values to avoid math domain errors
+        if amount <= 0:
+            return "0"
+
+        # Your custom suffixes
+        suffixes = ["", "k", "kk", "kkk", "kkkk"]
+
+        # Calculate the magnitude (index)
+        # math.log10(amount) / 3 tells us how many groups of 3 zeros there are
+        i = int(math.floor(math.log10(amount) / 3))
+
+        # Ensure the index doesn't exceed the available suffixes
+        i = min(i, len(suffixes) - 1)
+
+        if i == 0:
+            return str(amount)
+
+        # Calculate the shortened value
+        value = amount / (1000 ** i)
+
+        # Format to 1 decimal place and strip ".0" if it's a whole number
+        return "{:.1f}".format(value).rstrip('0').rstrip('.') + suffixes[i]
+
     # -------------------- UI callbacks -------------------- #
 
     def browse_file(self):
@@ -904,9 +929,9 @@ class LootMonitorApp(tk.Tk):
 
         if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
             try:
-                self.mini_yang.config(text=f"Yang: {dropped_yang:,}")
-                self.mini_hr.config(text=f"Yang/h: {yang_per_hour:,}")
-                self.mini_min.config(text=f"Yang/m: {yang_per_minute:,}")
+                self.mini_yang.config(text=f"Yang: {dropped_yang:,} ({self.format_yang_short(dropped_yang)})")
+                self.mini_hr.config(text=f"Yang/h: {yang_per_hour:,} ({self.format_yang_short(yang_per_hour)})")
+                self.mini_min.config(text=f"Yang/m: {yang_per_minute:,} ({self.format_yang_short(yang_per_minute)})")
             except Exception:
                 # This catches cases where winfo_exists was true but the widget was mid-destruction
                 pass
@@ -937,10 +962,10 @@ class LootMonitorApp(tk.Tk):
         material_value = sum(item[3] for item in stats["items"])
 
         # Update yang stats
-        self.yang_label.config(text=f"{dropped_yang:,} Yang")
-        self.yang_per_hour_label.config(text=f"{yang_per_hour:,} Yang")
-        self.yang_per_minute_label.config(text=f"{yang_per_minute:,} Yang")
-        self.material_value_label.config(text=f"{material_value:,} Yang")
+        self.yang_label.config(text=f"{dropped_yang:,} ({self.format_yang_short(dropped_yang)}) Yang")
+        self.yang_per_hour_label.config(text=f"{yang_per_hour:,} ({self.format_yang_short(yang_per_hour)}) Yang")
+        self.yang_per_minute_label.config(text=f"{yang_per_minute:,} ({self.format_yang_short(yang_per_minute)}) Yang")
+        self.material_value_label.config(text=f"{material_value:,} ({self.format_yang_short(material_value)}) Yang")
 
         # Render the dynamic Dungeon blocks
         self.render_dungeon_blocks(stats)
