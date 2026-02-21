@@ -277,7 +277,7 @@ class LootMonitorApp(tk.Tk):
         super().__init__()
 
         self.title("💰 Jinteia Real-time Yang & Loot Tracker")
-        self.geometry("700x800")
+        self.geometry("650x950")
 
         # Set dark theme colors
         self.bg_color = "#1a1a2e"
