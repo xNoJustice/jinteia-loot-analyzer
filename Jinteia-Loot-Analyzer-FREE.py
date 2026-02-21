@@ -419,9 +419,17 @@ class LootMonitorApp(tk.Tk):
         self.yang_per_minute_label = add_stat_row("Dropped Yang / Minute:", 4, "#f59e0b")
         self.yang_per_minute_label.config(font=("Segoe UI", 11, "bold"))
 
-        # Row 5: Total Item Value (Net Worth)
-        self.material_value_label = add_stat_row("Total Items Value:", 5, "#a855f7") # Purple color for profit
-        self.material_value_label.config(font=("Segoe UI", 11, "bold"))
+        # Row 5: Total Net Worth (Yang + Items)
+        self.total_worth_label = add_stat_row("Total Net Worth:", 6, "#10b981")
+        self.total_worth_label.config(font=("Segoe UI", 11, "bold"))
+
+        # Row 6: Total Net Worth / Hour
+        self.total_worth_hr_label = add_stat_row("Total Worth / Hour:", 7, "#34d399")
+        self.total_worth_hr_label.config(font=("Segoe UI", 11, "bold"))
+
+        # Row 7: Total Net Worth / Minute
+        self.total_worth_min_label = add_stat_row("Total Worth / Minute:", 8, "#6ee7b7")
+        self.total_worth_min_label.config(font=("Segoe UI", 11, "bold"))
 
         # --- DUNGEON BLOCKS (NEW) ---
         dungeon_container = tk.Frame(self.tab_main, bg=self.card_bg, pady=10)
@@ -637,15 +645,19 @@ class LootMonitorApp(tk.Tk):
         if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
             self.mini_win.destroy()
             self.mini_win = None
+            self.deiconify() # Show main window
+            self.attributes("-alpha", 1.0)
             return
 
         # Otherwise, create it
+        self.attributes("-alpha", 0.0)
+        self.withdraw()
+
         self.mini_win = tk.Toplevel(self)
-        self.mini_win.title("Loot Mini")
-        self.mini_win.geometry("220x100")
         self.mini_win.attributes("-topmost", True)
-        self.mini_win.configure(bg="#1a1a2e")
         self.mini_win.overrideredirect(True) # Borderless
+        self.mini_win.geometry("220x140")
+        self.mini_win.configure(bg="#1a1a2e")
 
         # Draggable logic
         def start_move(event): self.mini_win.x, self.mini_win.y = event.x, event.y
@@ -657,15 +669,22 @@ class LootMonitorApp(tk.Tk):
         self.mini_win.bind("<Button-1>", start_move)
         self.mini_win.bind("<B1-Motion>", on_move)
 
+        tk.Label(self.mini_win, text="LOOT ANALYZER", fg="#94a3b8", bg="#1a1a2e", font=("Segoe UI", 7, "bold")).pack()
+
         # UI Elements
-        self.mini_yang = tk.Label(self.mini_win, text="Yang: 0", fg=self.accent_color, bg="#1a1a2e", font=("Segoe UI", 11, "bold"))
-        self.mini_yang.pack(pady=(15, 2))
+        self.mini_yang = tk.Label(self.mini_win, text="Total Yang: 0", fg=self.accent_color, bg="#1a1a2e", font=("Segoe UI", 11, "bold"))
+        self.mini_yang.pack(pady=(2))
 
-        self.mini_hr = tk.Label(self.mini_win, text="Yang/h: 0", fg=self.accent_secondary, bg="#1a1a2e", font=("Segoe UI", 10))
-        self.mini_hr.pack()
+        self.mini_hr = tk.Label(self.mini_win, text="Total Yang/h: 0", fg=self.accent_secondary, bg="#1a1a2e", font=("Segoe UI", 10))
+        self.mini_hr.pack(pady=(2))
 
-        self.mini_min = tk.Label(self.mini_win, text="Yang/m: 0", fg="#f59e0b", bg="#1a1a2e", font=("Segoe UI", 10))
+        self.mini_min = tk.Label(self.mini_win, text="Total Yang/m: 0", fg="#f59e0b", bg="#1a1a2e", font=("Segoe UI", 10))
         self.mini_min.pack()
+
+        # Restore Button
+        exit_btn = tk.Label(self.mini_win, text="[ BACK TO DASHBOARD ]", fg="#f59e0b", bg="#1a1a2e", font=("Segoe UI", 8, "bold"), cursor="hand2")
+        exit_btn.pack(pady=10)
+        exit_btn.bind("<Button-1>", lambda e: self.toggle_mini_window())
 
     def create_dungeon_block(self, parent, name, count, bg):
         """Creates a styled card for a dungeon run."""
@@ -704,7 +723,9 @@ class LootMonitorApp(tk.Tk):
         self.yang_label.config(text="0", fg=self.accent_color)
         self.yang_per_hour_label.config(text="0", fg=self.accent_secondary)
         self.yang_per_minute_label.config(text="0", fg="#f59e0b")
-        self.material_value_label.config(text="0", fg="#a855f7")
+        self.total_worth_label.config(text="0", fg="#10b981")
+        self.total_worth_hr_label.config(text="0", fg="#34d399")
+        self.total_worth_min_label.config(text="0", fg="#6ee7b7")
         self.tree.delete(*self.tree.get_children())
 
     def update_status(self, text: str):
@@ -927,15 +948,6 @@ class LootMonitorApp(tk.Tk):
         yang_per_minute = stats["yang_per_minute"]
         items_list = stats["items"]
 
-        if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
-            try:
-                self.mini_yang.config(text=f"Yang: {dropped_yang:,} ({self.format_yang_short(dropped_yang)})")
-                self.mini_hr.config(text=f"Yang/h: {yang_per_hour:,} ({self.format_yang_short(yang_per_hour)})")
-                self.mini_min.config(text=f"Yang/m: {yang_per_minute:,} ({self.format_yang_short(yang_per_minute)})")
-            except Exception:
-                # This catches cases where winfo_exists was true but the widget was mid-destruction
-                pass
-
         # Update time info
         if start.date() != end.date():
             # Shows: 24/11 22:30:05 -> 25/11 01:15:00
@@ -958,14 +970,38 @@ class LootMonitorApp(tk.Tk):
 
         self.window_length_label.config(text=window_txt, fg=self.text_color)
 
-        # Calculate Material Value
-        material_value = sum(item[3] for item in stats["items"])
-
         # Update yang stats
         self.yang_label.config(text=f"{dropped_yang:,} ({self.format_yang_short(dropped_yang)}) Yang")
         self.yang_per_hour_label.config(text=f"{yang_per_hour:,} ({self.format_yang_short(yang_per_hour)}) Yang")
         self.yang_per_minute_label.config(text=f"{yang_per_minute:,} ({self.format_yang_short(yang_per_minute)}) Yang")
-        self.material_value_label.config(text=f"{material_value:,} ({self.format_yang_short(material_value)}) Yang")
+
+        # Calculate Material Value
+        material_value = sum(item[3] for item in stats["items"])
+
+        total_net_worth = dropped_yang + material_value
+        total_worth_per_hour = int(round(total_net_worth / hours)) if hours > 0 else 0
+        total_worth_per_minute = int(round(total_net_worth / minutes)) if minutes > 0 else 0
+
+        self.total_worth_label.config(
+            text=f"{total_net_worth:,} ({self.format_yang_short(total_net_worth)}) Yang"
+        )
+        self.total_worth_hr_label.config(
+            text=f"{total_worth_per_hour:,} ({self.format_yang_short(total_worth_per_hour)}) Yang"
+        )
+        self.total_worth_min_label.config(
+            text=f"{total_worth_per_minute:,} ({self.format_yang_short(total_worth_per_minute)}) Yang"
+        )
+
+        if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
+            try:
+                total_net_worth = dropped_yang + material_value
+                total_worth_per_hour = int(round(total_net_worth / hours)) if hours > 0 else 0
+
+                self.mini_yang.config(text=f"Total: {total_net_worth:,} ({self.format_yang_short(total_net_worth)})")
+                self.mini_hr.config(text=f"Total/Hr: {total_worth_per_hour:,} ({self.format_yang_short(total_worth_per_hour)})")
+                self.mini_min.config(text=f"Total/Min: {total_worth_per_minute:,} ({self.format_yang_short(total_worth_per_minute)})")
+            except Exception:
+                pass
 
         # Render the dynamic Dungeon blocks
         self.render_dungeon_blocks(stats)
