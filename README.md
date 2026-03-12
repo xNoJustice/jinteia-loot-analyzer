@@ -41,3 +41,6 @@ This is free version of loot analyzer. This is community project, so every impro
 ### v1.0
 - App created by Paysami.
 </details>
+
+<img width="699" height="931" alt="image" src="https://github.com/user-attachments/assets/7991c24d-b1cd-46e1-94a3-bda56f2b800a" /> <br />
+<img width="239" height="189" alt="image" src="https://github.com/user-attachments/assets/b97efe57-2d15-4fa1-a704-dd929281c5d1" />
