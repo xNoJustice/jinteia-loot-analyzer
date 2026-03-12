@@ -6,15 +6,20 @@ import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Optional, Iterable, List, Deque, Dict, Tuple
+from typing import Optional, List, Deque, Dict, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import json
 import math
+import pygame
+
+CURRENT_VERSION = "1.3"
+VERSION_URL = "https://raw.githubusercontent.com/xNoJustice/jinteia-loot-analyzer/main/version.txt"
+DOWNLOAD_URL = "https://github.com/xNoJustice/jinteia-loot-analyzer" # Link to your GitHub
 
 # ---------------------------------------------------------------------------
-# Parsing and data structures
+# PARSING AND DATA STRUCTURES: CORE UTILITIES FOR LOG PROCESSING
 # ---------------------------------------------------------------------------
 
 DUNGEONS = {
@@ -56,6 +61,7 @@ DUNGEONS = {
     },
 }
 
+# PERMISSIVE REGEX: SEARCHES FOR THE PATTERN ANYWHERE IN THE LINE
 LOG_LINE_RE = re.compile(
     r"\[(\d{2}/\d{2}/\d{2})\] \[(\d{2}:\d{2}:\d{2})\]: You receive (\d+) (.+?)\."
 )
@@ -79,53 +85,14 @@ def parse_log_line(line: str) -> Optional[LootEvent]:
     m = LOG_LINE_RE.search(line)
     if not m:
         return None
+
     date_str, time_str, qty_str, item = m.groups()
     ts = parse_datetime_from_log(date_str, time_str)
     quantity = int(qty_str)
     return LootEvent(ts=ts, quantity=quantity, item=item)
-def iter_events_from_file(path: str) -> Iterable[LootEvent]:
-    """Iterate over all events in the given log file."""
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            ev = parse_log_line(line)
-            if ev:
-                yield ev
-
-def stats_from_events(events: Iterable[LootEvent]) -> Dict:
-    """Compute statistics from a list/iterable of events."""
-    dropped_yang = 0
-    items_qty = defaultdict(int)
-    events_list: List[LootEvent] = []
-
-    for ev in events:
-        events_list.append(ev)
-        if ev.is_yang:
-            dropped_yang += ev.quantity
-        else:
-            items_qty[ev.item] += ev.quantity
-
-    if not events_list:
-        return {
-            "dropped_yang": 0,
-            "items_qty": {},
-            "hours": 0.0,
-        }
-
-    start = events_list[0].ts
-    end = events_list[-1].ts
-    elapsed_seconds = max((end - start).total_seconds(), 1)
-    hours = elapsed_seconds / 3600.0
-
-    return {
-        "dropped_yang": dropped_yang,
-        "items_qty": dict(items_qty),
-        "hours": hours,
-        "start": start,
-        "end": end,
-    }
-
+    
 # ---------------------------------------------------------------------------
-# Live monitor worker (background thread)
+# LIVE MONITOR WORKER: ASYNCHRONOUS THREAD FOR REAL-TIME LOG TAILING
 # ---------------------------------------------------------------------------
 
 class LiveMonitorWorker(threading.Thread):
@@ -142,6 +109,7 @@ class LiveMonitorWorker(threading.Thread):
         from_start: bool,
         update_callback,
         stop_event: threading.Event,
+        new_event_callback=None,
     ):
         super().__init__(daemon=True)
         self.path = path
@@ -150,11 +118,17 @@ class LiveMonitorWorker(threading.Thread):
         self.from_start = from_start
         self.update_callback = update_callback
         self.stop_event = stop_event
+        self.new_event_callback = new_event_callback
 
         self.window: Deque[LootEvent] = deque()
+        self.processed_count = 0
+        self.last_item_name = "None"
 
     def add_event(self, ev: LootEvent, ignore_cutoff: bool = False):
         self.window.append(ev)
+        self.processed_count += 1
+        self.last_item_name = ev.item
+        
         if not ignore_cutoff:
             cutoff = ev.ts - dt.timedelta(minutes=self.window_minutes)
             while self.window and self.window[0].ts < cutoff:
@@ -164,43 +138,43 @@ class LiveMonitorWorker(threading.Thread):
         if not self.window:
             return None
 
-        events_list = list(self.window)
-        dropped_yang = sum(ev.quantity for ev in events_list if ev.is_yang)
-        items_qty: Dict[str, int] = defaultdict(int)
+        # SORT WINDOW ONCE BEFORE CALCULATING
+        events_list = sorted(list(self.window), key=lambda x: x.ts)
+        if not events_list:
+            return None
 
-        # Track Dungeon Runs
+        # CALCULATE SESSION TIME BASELINE (CRITICAL FIX FOR NAMEERRORS)
+        start   = events_list[0].ts
+        end     = events_list[-1].ts
+        elapsed = max((end - start).total_seconds(), 1)
+        hours   = elapsed / 3600.0
+        minutes = elapsed / 60.0
+        
+        dropped_yang = sum(ev.quantity for ev in events_list if ev.is_yang)
+        items_qty = defaultdict(int)
         dungeon_runs = defaultdict(int)
         total_runs = 0
 
         for ev in events_list:
             if not ev.is_yang:
                 items_qty[ev.item] += ev.quantity
-                # Check if item belongs to a dungeon chest
+                
+                # DUNGEON TRACKING (CASE-SENSITIVE MATCHING GAME LOGS)
                 for d_name, d_data in DUNGEONS.items():
                     if ev.item in d_data["items"]:
                         dungeon_runs[d_name] += ev.quantity
                         total_runs += ev.quantity
 
-        start = events_list[0].ts
-        end = events_list[-1].ts
-        elapsed = max((end - start).total_seconds(), 1)
-        hours = elapsed / 3600.0
-        minutes = elapsed / 60.0
-
-        # Build per-item stats including per-hour (rounded to int)
+        # BUILD THE FINAL LIST FOR UI
         items_list: List[Tuple[str, int, int, int]] = []
-        total_item_value = 0
-
         prices = getattr(self, 'price_db', {})
-
         for name, qty in items_qty.items():
             per_hour = int(round(qty / hours))
             price = prices.get(name, 0)
             item_value = qty * price
-            total_item_value += item_value
             items_list.append((name, qty, per_hour, item_value))
 
-        # Sort by quantity desc
+        # ORDER THE COLLECTED ITEMS BY THEIR TOTAL QUANTITY IN DESCENDING ORDER
         items_list.sort(key=lambda x: x[1], reverse=True)
 
         stats = {
@@ -215,6 +189,7 @@ class LiveMonitorWorker(threading.Thread):
             "dungeon_runs": dict(dungeon_runs),
             "total_dungeon_runs": total_runs
         }
+        
         return stats
 
     def run(self):
@@ -222,823 +197,1151 @@ class LiveMonitorWorker(threading.Thread):
             self.update_callback({"status": "Opening log file..."})
             f = open(self.path, "r", encoding="utf-8", errors="ignore")
         except OSError as e:
-            # Send error to UI via callback as None with extra key
+            # NOTIFY THE MAIN UI THREAD ABOUT FILE SYSTEM ERRORS VIA CALLBACK
             self.update_callback({"error": f"Cannot open log file: {e}"})
             return
 
         if self.from_start:
             self.update_callback({"status": "Reading historical data (this may take a moment)..."})
-            # Read all existing lines
+            # PROCESS THE ENTIRE BACKLOG OF THE CURRENT LOG FILE ON INITIALIZATION
             for line in f:
                 ev = parse_log_line(line)
                 if ev:
-                    # Pass True to keep historical data during the initial load
+                    # ENABLE RETENTION OF OLD LOG DATA DURING THE STARTUP SCANNING PHASE
                     self.add_event(ev, ignore_cutoff=True)
 
 
             self.update_callback({"status": "Historical data loaded. Starting live monitor."})
-            # Update UI immediately after reading historical data
+            # REFRESH THE DASHBOARD COMPONENTS INSTANTLY ONCE THE BACKLOG IS PROCESSED
             stats = self.compute_stats_from_window()
             if stats:
                 self.update_callback(stats)
         else:
-            # Jump to the end if we only want live data
+            # SEEK TO THE END OF THE FILE TO IGNORE HISTORICAL ENTRIES AND ONLY CAPTURE NEW DATA
             f.seek(0, os.SEEK_END)
             self.update_callback({"status": "Monitoring live logs..."})
 
         last_print = time.time()
 
         while not self.stop_event.is_set():
-            line = f.readline()
-            if not line:
-                # no new data
-                time.sleep(0.2)
-            else:
+            lines_found = False
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+
                 ev = parse_log_line(line)
                 if ev:
                     self.add_event(ev)
+                    lines_found = True
+                    if self.new_event_callback:
+                        self.new_event_callback(ev)
 
+            if not lines_found:
+                time.sleep(0.2)
+               
             now_ts = time.time()
             if now_ts - last_print >= self.refresh_secs:
                 last_print = now_ts
                 stats = self.compute_stats_from_window()
                 if stats is not None:
+                    stats["processed_count"] = self.processed_count
+                    stats["last_item"] = self.last_item_name
                     self.update_callback(stats)
 
         f.close()
         self.update_callback({"status": "Monitoring stopped."})
 
 # ---------------------------------------------------------------------------
-# Tkinter UI - Modern Dark Theme
+# TKINTER USER INTERFACE: MAIN APPLICATION FRAMEWORK AND VISUAL COMPONENTS
 # ---------------------------------------------------------------------------
 
 class LootMonitorApp(tk.Tk):
+    # ── INITIALIZATION: SETUP CORE APP STATE AND THEME ──────────────────
     def __init__(self):
         super().__init__()
+        self.title("⚔️ Jinteia Loot Analyzer")
+        self.geometry("700x900")
 
-        self.title("💰 Jinteia Real-time Yang & Loot Tracker")
-        self.geometry("650x950")
-
-        # Set dark theme colors
-        self.bg_color = "#1a1a2e"
-        self.card_bg = "#16213e"
-        self.accent_color = "#0fcc45"
-        self.accent_secondary = "#0ea5e9"
-        self.text_color = "#e2e8f0"
-        self.muted_text = "#94a3b8"
+        # colour palette
+        self.bg_color         = "#0d0f14"
+        self.sidebar_bg       = "#111318"
+        self.header_bg        = "#111318"
+        self.card_bg          = "#181b24"
+        self.card_border      = "#252a38"
+        self.input_bg         = "#2a2e3f"
+        self.input_border     = "#454d66"
+        self.accent_color     = "#00c853"
+        self.accent_hover     = "#00e676"
+        self.accent_secondary = "#00b4d8"
+        self.accent_amber     = "#f59e0b"
+        self.text_color       = "#e0e6f0"
+        self.muted_text       = "#4e5a72"
+        self.sep_color        = "#1e2234"
 
         self.configure(bg=self.bg_color)
-
-        # Configure styles
         self.style = ttk.Style(self)
         self.style.theme_use("clam")
+        self._apply_styles()
 
-        # Configure ttk styles
-        self.style.configure("TFrame", background=self.bg_color)
-        self.style.configure("TLabelframe", background=self.bg_color, relief="flat", borderwidth=0)
-        self.style.configure("TLabelframe.Label", background=self.card_bg, foreground=self.text_color,
-                           font=("Segoe UI", 11, "bold"), padding=(10, 5))
-        self.style.configure("TLabel", background=self.bg_color, foreground=self.text_color,
-                           font=("Segoe UI", 10))
-        self.style.configure("Header.TLabel", font=("Segoe UI", 12, "bold"), foreground=self.accent_color)
-        self.style.configure("Stats.TLabel", font=("Segoe UI", 18, "bold"), foreground=self.accent_secondary)
-
-        # Button styles
-        self.style.configure("TNotebook", background=self.bg_color, borderwidth=0)
-        self.style.configure("TNotebook.Tab", background=self.card_bg, foreground=self.text_color, padding=[10, 5])
-        self.style.map("TNotebook.Tab", background=[("selected", self.accent_secondary)], foreground=[("selected", "white")])
-        self.style.configure("Accent.TButton", background=self.accent_color, foreground="white",
-                           font=("Segoe UI", 10, "bold"), borderwidth=0, padding=10)
-        self.style.map("Accent.TButton",
-                      background=[("active", "#0db33d"), ("disabled", "#4a5568")])
-
-        self.style.configure("Secondary.TButton", background="#4a5568", foreground="white",
-                           font=("Segoe UI", 10), borderwidth=0, padding=8)
-
-        # Treeview styles
-        self.style.configure("Treeview", background="#2d3748", foreground=self.text_color,
-                           fieldbackground="#2d3748", borderwidth=0, font=("Segoe UI", 10))
-        self.style.configure("Treeview.Heading", background="#1e293b", foreground=self.accent_secondary,
-                           font=("Segoe UI", 10, "bold"), borderwidth=0)
-        self.style.map("Treeview", background=[("selected", "#4a5568")])
-        self.style.map("Treeview",
-                        background=[('selected', '#3b82f6')], # A nice blue for selection
-                        foreground=[('selected', 'white')]
-                    )
-
-        self.stop_event = threading.Event()
+        self.stop_event          = threading.Event()
         self.worker: Optional[LiveMonitorWorker] = None
         self.last_received_stats = None
+        self.glow_val = 255
+        self.glow_dir = -8
+
+        # INITIALIZE THE PYGAME MIXER FOR MULTIMEDIA FEEDBACK AND PERSISTENT AUDIO RULES
+        try:
+            pygame.mixer.init()
+        except: pass
+        self.drop_sounds = []
+        self.drop_sounds_enabled = tk.BooleanVar(value=True)
+        self.default_sound_duration = tk.DoubleVar(value=5.0)
+        self.mini_pos = None # PERSISTENT COORDINATE STRING FOR MINI-MODE WINDOW POSITIONING
 
         self.load_bookmarks()
         self.load_prices()
+        self.load_sounds()
         self.create_widgets()
+        self.load_data()
+        self.after(2000, self.check_for_updates_ui)
 
-    # -------------------- UI layout -------------------- #
+    # ── STYLING: DEFINE CUSTOM TTK LOOK AND FEEL ────────────────────────
+    def _apply_styles(self):
+        self.style.configure("Treeview",
+            background=self.card_bg, foreground=self.text_color,
+            fieldbackground=self.card_bg, borderwidth=0,
+            font=("Segoe UI", 10), rowheight=26)
+        self.style.configure("Treeview.Heading",
+            background=self.input_bg, foreground=self.accent_secondary,
+            font=("Segoe UI", 10, "bold"), relief="flat", borderwidth=0)
+        self.style.map("Treeview",
+            background=[("selected", "#2a3a5a")],
+            foreground=[("selected", "white")])
+        self.style.map("Treeview.Heading",
+            background=[("active", self.input_bg)])
 
+        self.style.configure("Accent.TButton",
+            background=self.accent_color, foreground="#000",
+            font=("Segoe UI", 10, "bold"), borderwidth=1, bordercolor=self.accent_color,
+            padding=(12, 7))
+        self.style.map("Accent.TButton",
+            background=[("active", self.accent_hover), ("disabled", "#1a2f1a")],
+            bordercolor=[("active", self.accent_hover)])
+
+        self.style.configure("Secondary.TButton",
+            background=self.input_bg, foreground=self.text_color,
+            font=("Segoe UI", 10), borderwidth=1, bordercolor=self.card_border,
+            padding=(10, 6))
+        self.style.map("Secondary.TButton",
+            background=[("active", "#2a3252")],
+            bordercolor=[("active", self.accent_secondary)])
+
+        self.style.configure("Danger.TButton",
+            background="#7f1d1d", foreground=self.text_color,
+            font=("Segoe UI", 10, "bold"), borderwidth=1, bordercolor="#991b1b",
+            padding=(10, 6))
+        self.style.map("Danger.TButton",
+            background=[("active", "#991b1b")])
+        self.style.configure("Vertical.TScrollbar",
+            background=self.card_border, troughcolor=self.card_bg,
+            borderwidth=0, arrowsize=12)
+
+    def check_for_updates_ui(self):
+        try:
+            import urllib.request
+            import webbrowser
+            
+            # Use timeout so the app doesn't freeze if internet is slow
+            with urllib.request.urlopen(VERSION_URL, timeout=2) as response:
+                latest_version = response.read().decode('utf-8').strip()
+
+            if latest_version > CURRENT_VERSION:
+                msg = (
+                    f"A new version ({latest_version}) is available!\n"
+                    f"Current version: {CURRENT_VERSION}\n\n"
+                    f"Click 'Yes' to open the download page."
+                )
+                # We use self.root as the parent so the popup stays on top
+                if messagebox.askyesno("Update Available", msg, parent=self):
+                    webbrowser.open(DOWNLOAD_URL)
+        except:
+            pass
+
+    # ── ROOT LAYOUT: CONSTRUCT MAIN APP CONTAINERS ──────────────────────
     def create_widgets(self):
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        # status bar
+        sb = tk.Frame(self, bg=self.header_bg, height=26)
+        sb.pack(side="bottom", fill="x")
+        sb.pack_propagate(False)
+        self.status_var = tk.StringVar(value="Ready — select a log file and press Start.")
+        tk.Label(sb, textvariable=self.status_var, bg=self.header_bg,
+                 fg=self.text_color, font=("Segoe UI", 9), anchor="w",
+                 padx=12).pack(side="left", fill="y")
+        self.live_dot = tk.Label(sb, text="●", bg=self.header_bg,
+                                 fg=self.text_color, font=("Segoe UI", 10))
+        self.live_dot.pack(side="right", padx=(0, 12))
+        tk.Label(sb, text="LIVE", bg=self.header_bg, fg=self.text_color,
+                 font=("Segoe UI", 8, "bold")).pack(side="right")
 
-        # --- TAB 1: DASHBOARD ---
-        self.tab_main = tk.Frame(self.notebook, bg=self.bg_color)
-        self.notebook.add(self.tab_main, text=" 🎮 Dashboard ")
+        # header
+        hdr = tk.Frame(self, bg=self.header_bg, height=52)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        left = tk.Frame(hdr, bg=self.header_bg)
+        left.pack(side="left", padx=16, fill="y")
+        tk.Label(left, text="⚔", bg=self.header_bg, fg=self.accent_color,
+                 font=("Segoe UI", 18)).pack(side="left", padx=(0, 8))
+        tk.Label(left, text="JINTEIA", bg=self.header_bg, fg=self.text_color,
+                 font=("Segoe UI", 14, "bold")).pack(side="left")
+        tk.Label(left, text="  LOOT ANALYZER", bg=self.header_bg,
+                 fg=self.accent_color, font=("Segoe UI", 14, "bold")).pack(side="left")
 
-        # Controls Card
-        controls_card = tk.Frame(self.tab_main, bg=self.card_bg, relief="flat", borderwidth=0)
-        controls_card.pack(fill="x", pady=(0, 5))
+        # PRIMARY MONITORING CONTROLS POSITIONED IN THE UPPER RIGHT HEADER AREA
+        ctrl_f = tk.Frame(hdr, bg=self.header_bg)
+        ctrl_f.pack(side="right", padx=12, fill="y")
 
-        # --- Updated Settings Header with Log Selection ---
-        controls_header = tk.Frame(controls_card, bg=self.card_bg)
-        controls_header.pack(fill="x", padx=20, pady=(15, 5))
+        def _cbtn(text, cmd, bg, fg):
+            b = tk.Button(ctrl_f, text=text, bg=bg, fg=fg,
+                          font=("Segoe UI", 9, "bold"), relief="flat", bd=0, 
+                          cursor="hand2", padx=14, pady=4,
+                          activebackground=bg, activeforeground=fg,
+                          command=cmd)
+            b.pack(side="left", padx=4, pady=10) # Centered vertically in the 52px header
+            return b
 
-        tk.Label(controls_header, text="Controls", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 11, "bold")).pack(side="left")
+        self.mini_window_button = _cbtn("📱 Mini", self.toggle_mini_window, "#2a3c5a", self.text_color)
+        self.stop_button  = _cbtn("⏹ Stop",  self.stop_monitor,  "#7f1d1d", self.text_color)
+        self.stop_button.configure(state="disabled")
+        self.start_button = _cbtn("▶ Start", self.start_monitor, self.accent_color, "#000")
+        
+        # body
+        self.topnav = tk.Frame(self, bg=self.sidebar_bg, height=44)
+        self.topnav.pack(fill="x")
+        self.topnav.pack_propagate(False)
+        self._build_topnav(self.topnav)
 
-        # Controls content
-        controls_content = tk.Frame(controls_card, bg=self.card_bg)
-        controls_content.pack(fill="x", padx=20, pady=(0, 20))
+        tk.Frame(self, bg=self.sep_color, height=1).pack(fill="x")
 
-        # Control buttons
-        control_buttons = tk.Frame(controls_content, bg=self.card_bg)
-        control_buttons.pack(fill="x", pady=(15, 0))
+        self.content_area = tk.Frame(self, bg=self.bg_color)
+        self.content_area.pack(fill="both", expand=True)
 
-        self.start_button = ttk.Button(control_buttons, text="▶ Start Monitoring",
-                                      command=self.start_monitor, style="Accent.TButton")
-        self.start_button.pack(side="left", padx=(0, 10))
+        self.pages = {}
+        self._build_dashboard()
+        self._build_settings()
+        self._build_market()
+        self._build_sounds()
+        self.show_page("dashboard")
 
-        self.stop_button = ttk.Button(control_buttons, text="⏹ Stop",
-                                     command=self.stop_monitor, style="Secondary.TButton",
-                                     state="disabled")
-        self.stop_button.pack(side="left")
+    # ── TOP NAVIGATION: GLOBAL PAGE SWITCHING AREA ──────────────────────
+    def _build_topnav(self, parent):
+        # Nav buttons on left
+        nav_f = tk.Frame(parent, bg=self.sidebar_bg)
+        nav_f.pack(side="left", padx=8)
 
-        self.mini_btn = ttk.Button(control_buttons, text="📱 Mini Mode",
-                                  command=self.toggle_mini_window, style="Secondary.TButton")
-        self.mini_btn.pack(side="left", padx=10)
+        self.nav_btns = {}
+        for key, label in [("dashboard", "🎮 Dashboard"),
+                            ("settings", "⚙️ Settings"),
+                            ("market", "🏷️ Market Prices"),
+                            ("sounds", "🔊 Drop Sounds")]:
+            btn = tk.Button(nav_f, text=label, bg=self.sidebar_bg, fg=self.text_color,
+                            font=("Segoe UI", 9), relief="flat", bd=0, cursor="hand2",
+                            padx=12, activebackground=self.sep_color,
+                            activeforeground=self.accent_color,
+                            command=lambda k=key: self.show_page(k))
+            btn.pack(side="left", padx=2, pady=6, ipady=4)
+            self.nav_btns[key] = btn
 
-        # Stats Dashboard
-        stats_card = tk.Frame(self.tab_main, bg=self.card_bg, relief="flat", borderwidth=0)
-        stats_card.pack(fill="x", pady=(0, 5))
+    def show_page(self, key):
+        for pg in self.pages.values():
+            pg.pack_forget()
+        for k, b in self.nav_btns.items():
+            b.configure(bg=(self.sep_color if k == key else self.sidebar_bg),
+                        fg=(self.accent_color if k == key else self.text_color))
+        if key == "sounds":
+            self._refresh_sound_item_list()
+        self.pages[key].pack(fill="both", expand=True)
 
-        # Stats header
-        stats_header = tk.Frame(stats_card, bg=self.card_bg)
-        stats_header.pack(fill="x", padx=20, pady=(15, 1))
-        tk.Label(stats_header, text="📊 Live Statistics", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 11, "bold")).pack(side="left")
+    # ── COMPONENT HELPER: CARD AND UI UTILITIES ─────────────────────────
+    def _card(self, parent, title=None, accent=True, **kw):
+        """Return a single card frame (pack/grid it yourself)."""
+        card = tk.Frame(parent, bg=self.card_bg,
+                        highlightthickness=1,
+                        highlightbackground=self.card_border, **kw)
+        if accent:
+            tk.Frame(card, bg=self.accent_secondary, height=2).pack(fill="x")
+        hdr_frame = None
+        if title:
+            hdr_frame = tk.Frame(card, bg=self.card_bg)
+            hdr_frame.pack(fill="x", padx=12, pady=(8, 0))
+            tk.Label(hdr_frame, text=title, bg=self.card_bg,
+                     fg=self.text_color, font=("Segoe UI", 8, "bold")).pack(side="left")
+        return card, hdr_frame
 
-        # Stats grid - Fully vertical alignment for time and currency
-        stats_grid = tk.Frame(stats_card, bg=self.card_bg)
-        stats_grid.pack(fill="x", padx=20, pady=(0, 20))
+    def _stat_row(self, parent, label, color=None):
+        row = tk.Frame(parent, bg=self.card_bg)
+        row.pack(fill="x", padx=14, pady=2)
+        tk.Label(row, text=label, bg=self.card_bg, fg=self.text_color,
+                 font=("Segoe UI", 9)).pack(side="left")
+        val = tk.Label(row, text="—", bg=self.card_bg,
+                       fg=color or self.text_color, font=("Segoe UI", 10, "bold"))
+        val.pack(side="right")
+        return val
 
-        # Helper function to make adding rows easier
-        def add_stat_row(label_text, row_idx, text_color):
-            lbl = tk.Label(stats_grid, text=label_text, bg=self.card_bg, fg=self.muted_text,
-                          font=("Segoe UI", 10, "bold"))
-            lbl.grid(row=row_idx, column=0, sticky="w", pady=2)
+    # ── DASHBOARD PAGE: REAL-TIME SESSION ANALYTICS ─────────────────────
+    def _build_dashboard(self):
+        page = tk.Frame(self.content_area, bg=self.bg_color)
+        self.pages["dashboard"] = page
 
-            val = tk.Label(stats_grid, text="---", bg=self.card_bg, fg=text_color,
-                          font=("Segoe UI", 10))
-            val.grid(row=row_idx, column=1, sticky="w", padx=10)
-            return val
+        # CREATE A FLEXIBLE SCROLLING CONTAINER TO ACCOMMODATE DYNAMIC DASHBOARD CARDS
+        self.dash_canvas = tk.Canvas(page, bg=self.bg_color, highlightthickness=0)
+        vsb = ttk.Scrollbar(page, orient="vertical", command=self.dash_canvas.yview)
+        scroll_frame = tk.Frame(self.dash_canvas, bg=self.bg_color)
 
-        # Row 0: Interval
-        self.interval_label = add_stat_row("Interval:", 0, self.text_color)
+        # This will hold the window id so we can resize it
+        self.dash_window = self.dash_canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        self.dash_canvas.configure(yscrollcommand=vsb.set)
 
-        # Row 1: Window
-        self.window_length_label = add_stat_row("Window:", 1, self.text_color)
+        def _on_dash_scroll(e):
+            self.dash_canvas.configure(scrollregion=self.dash_canvas.bbox("all"))
+            # Force inner frame to match canvas width
+            self.dash_canvas.itemconfig(self.dash_window, width=self.dash_canvas.winfo_width())
 
-        # Row 2: Total Yang
-        self.yang_label = add_stat_row("Dropped Yang:", 2, self.accent_color)
-        self.yang_label.config(font=("Segoe UI", 11, "bold")) # Make the numbers slightly pop
+        self.dash_canvas.bind("<Configure>", _on_dash_scroll)
+        vsb.pack(side="right", fill="y")
+        self.dash_canvas.pack(side="left", fill="both", expand=True)
 
-        # Row 3: Yang / Hour
-        self.yang_per_hour_label = add_stat_row("Dropped Yang / Hour:", 3, self.accent_secondary)
-        self.yang_per_hour_label.config(font=("Segoe UI", 11, "bold"))
+        # Mouse wheel support
+        def _on_mousewheel(e):
+            self.dash_canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+        self.dash_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-        # Row 4: Yang / Minute
-        self.yang_per_minute_label = add_stat_row("Dropped Yang / Minute:", 4, "#f59e0b")
-        self.yang_per_minute_label.config(font=("Segoe UI", 11, "bold"))
+        # -- Contents stacked vertically
+        col_l = tk.Frame(scroll_frame, bg=self.bg_color)
+        col_c = tk.Frame(scroll_frame, bg=self.bg_color)
+        col_r = tk.Frame(scroll_frame, bg=self.bg_color)
 
-        # Row 5: Total Net Worth (Yang + Items)
-        self.total_worth_label = add_stat_row("Total Net Worth:", 6, "#10b981")
-        self.total_worth_label.config(font=("Segoe UI", 11, "bold"))
+        col_l.pack(side="top", fill="x", padx=16, pady=8)
+        col_c.pack(side="top", fill="both", expand=True, padx=16, pady=8)
+        col_r.pack(side="top", fill="x", padx=16, pady=8)
 
-        # Row 6: Total Net Worth / Hour
-        self.total_worth_hr_label = add_stat_row("Total Worth / Hour:", 7, "#34d399")
-        self.total_worth_hr_label.config(font=("Segoe UI", 11, "bold"))
+        # PRIMARY FINANCIAL CARD DISPLAYING YANG DROPS AND HOURLY EARNING RATES
+        yang_c, _ = self._card(col_l, "YANG STATISTICS")
+        yang_c.pack(fill="x", pady=(0, 6))
+        tk.Label(yang_c, text="NET WORTH (Yang + Items)", bg=self.card_bg,
+                 fg=self.text_color, font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(6, 0))
+        self.total_worth_label = tk.Label(yang_c, text="—", bg=self.card_bg,
+                                   fg=self.accent_color, font=("Segoe UI", 22, "bold"))
+        self.total_worth_label.pack(anchor="w", padx=14, pady=(0, 4))
+        tk.Frame(yang_c, bg=self.card_border, height=1).pack(fill="x", padx=14, pady=3)
+        self.total_worth_hr_label   = self._stat_row(yang_c, "Per Hour",   self.accent_secondary)
+        self.total_worth_min_label = self._stat_row(yang_c, "Per Minute", self.accent_amber)
+        tk.Frame(yang_c, bg=self.card_border, height=1).pack(fill="x", padx=14, pady=3)
 
-        # Row 7: Total Net Worth / Minute
-        self.total_worth_min_label = add_stat_row("Total Worth / Minute:", 8, "#6ee7b7")
-        self.total_worth_min_label.config(font=("Segoe UI", 11, "bold"))
+        tk.Label(yang_c, text="Dropped Yang", bg=self.card_bg,
+                 fg=self.text_color, font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=14, pady=(2, 0))
+        self.yang_label     = self._stat_row(yang_c, "Total",      "#10b981")
+        self.yang_per_hour_label  = self._stat_row(yang_c, "Per Hour",   "#34d399")
+        self.yang_per_minute_label = self._stat_row(yang_c, "Per Minute", "#6ee7b7")
+        tk.Frame(yang_c, bg=self.card_bg, height=6).pack()
 
-        # --- DUNGEON BLOCKS (NEW) ---
-        dungeon_container = tk.Frame(self.tab_main, bg=self.card_bg, pady=10)
-        dungeon_container.pack(fill="x", padx=10)
+        # TIME-BASED METRICS SHOWING SESSION DURATION AND ANALYSIS WINDOWS
+        sess_c, _ = self._card(col_l, "SESSION")
+        sess_c.pack(fill="x", pady=(0, 6))
+        self.interval_label      = self._stat_row(sess_c, "Interval")
+        self.window_length_label = self._stat_row(sess_c, "Window")
+        tk.Frame(sess_c, bg=self.card_bg, height=6).pack()
 
-        tk.Label(dungeon_container, text="🏰 Dungeon Runs", bg=self.card_bg, fg=self.text_color, font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10)
+        # DUNGEON BOSS KILL TRACKER SHOWING RUN COUNTS FOR VARIOUS BOSS TYPES
+        dung_c, _ = self._card(col_l, "DUNGEON RUNS")
+        dung_c.pack(fill="both", expand=True)
+        self.dungeon_blocks = tk.Frame(dung_c, bg=self.card_bg)
+        self.dungeon_blocks.pack(fill="both", expand=True, padx=8, pady=6)
 
-        # The frame that will hold the dynamic blocks
-        self.dungeon_blocks = tk.Frame(dungeon_container, bg=self.card_bg)
-        self.dungeon_blocks.pack(fill="x", pady=5)
-
-        # Loot Items Table
-        loot_card = tk.Frame(self.tab_main, bg=self.card_bg, relief="flat", borderwidth=0)
-        loot_card.pack(fill="both", expand=True)
-
-        # Loot header
-        loot_header = tk.Frame(loot_card, bg=self.card_bg)
-        loot_header.pack(fill="x", padx=20, pady=(15, 10))
-        tk.Label(loot_header, text="📦 Collected Items", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 11, "bold")).pack(side="left")
-
-        # Add this Search Box next to the header
+        # MAIN ITEM DISPLAY TABLE FEATURING FILTRATION AND SEARCH CAPABILITIES
+        loot_c, loot_hdr = self._card(col_c, "COLLECTED ITEMS")
+        loot_c.pack(fill="both", expand=True)
         self.loot_search_var = tk.StringVar()
-        self.loot_search_var.trace_add("write", lambda *args: self.refresh_last_stats())
+        self.loot_search_var.trace_add("write", lambda *a: self.refresh_last_stats())
+        sf = tk.Frame(loot_hdr, bg=self.input_bg, padx=6, pady=2,
+                      highlightthickness=1, highlightbackground=self.input_border)
+        sf.pack(side="right")
+        tk.Label(sf, text="🔍", bg=self.input_bg, fg=self.text_color,
+                 font=("Segoe UI", 9)).pack(side="left")
+        tk.Entry(sf, textvariable=self.loot_search_var, bg=self.input_bg,
+                 fg=self.text_color, insertbackground=self.text_color,
+                 relief="flat", font=("Segoe UI", 10), width=22, bd=0).pack(side="left", padx=4)
 
-        search_entry = tk.Entry(loot_header, textvariable=self.loot_search_var, bg="#2d3748",
-                                fg=self.text_color, insertbackground=self.text_color,
-                                relief="flat", width=25)
-        search_entry.pack(side="right", padx=5)
-        tk.Label(loot_header, text="🔍", bg=self.card_bg, fg=self.muted_text).pack(side="right")
-
-        # Treeview with custom styling
-        tree_container = tk.Frame(loot_card, bg=self.card_bg)
-        tree_container.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-
-        self.tree = ttk.Treeview(tree_container, columns=("star", "item", "qty", "hr", "val"), show="headings")
-        for col, txt in zip(self.tree["columns"], ("⭐", "Item Name", "Quantity", "Qty/h", "Total Value")):
-            self.tree.heading(col, text=txt)
-            self.tree.column(col, width=40 if col=="star" else 120, anchor="center" if col!="item" else "w")
-        self.tree.pack(fill="both", expand=True)
-        self.tree.bind("<Button-1>", self.on_tree_click)
-
-        # Scrollbars
-        vsb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_container, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        # Grid layout for tree and scrollbars
+        tf = tk.Frame(loot_c, bg=self.card_bg)
+        tf.pack(fill="both", expand=True, padx=6, pady=6)
+        self.tree = ttk.Treeview(tf, columns=("star", "item", "qty", "hr", "val"), 
+                                 show="headings", height=12)
+        for cid, txt, w, anc in [("star","★",32,"center"),("item","Item Name",180,"w"),
+                                  ("qty","Quantity",85,"center"),("hr","Qty/h",80,"center"),
+                                  ("val","Value",95,"center")]:
+            self.tree.heading(cid, text=txt)
+            self.tree.column(cid, width=w, anchor=anc, minwidth=w)
+        vsb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
+        tf.grid_rowconfigure(0, weight=1)
+        tf.grid_columnconfigure(0, weight=1)
+        self.tree.bind("<Button-1>", self.on_tree_click)
 
-        tree_container.grid_rowconfigure(0, weight=1)
-        tree_container.grid_columnconfigure(0, weight=1)
+    # ── SETTINGS PAGE: MONITORING AND FILE OPTIONS ──────────────────────
+    def _build_settings(self):
+        page = tk.Frame(self.content_area, bg=self.bg_color)
+        self.pages["settings"] = page
+        wrap = tk.Frame(page, bg=self.bg_color)
+        wrap.pack(fill="both", expand=True, padx=28, pady=22)
+        tk.Label(wrap, text="⚙️  Settings", bg=self.bg_color, fg=self.text_color,
+                 font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 14))
 
-        # Status
-        self.status_var = tk.StringVar(value="Ready")
-        self.status_bar = tk.Label(self, textvariable=self.status_var, bd=1, relief="sunken",
-                                  anchor="w", bg="#1e293b", fg=self.muted_text,
-                                  font=("Segoe UI", 9), padx=10, pady=2)
-        self.status_bar.pack(side="bottom", fill="x")
-
-        # --- TAB 2: SETTINGS ---
-
-        self.tab_settings = tk.Frame(self.notebook, bg=self.bg_color, relief="flat", borderwidth=0)
-        self.notebook.add(self.tab_settings, text=" ⚙️ Settings ")
-
-        # Controls content
-        settings_content = tk.Frame(self.tab_settings, bg=self.card_bg)
-        settings_content.pack(fill="x", padx=20, pady=(0, 20))
-
-        settings_header = tk.Frame(settings_content, bg=self.card_bg, pady=10)
-        settings_header.pack(fill="x", padx=20, pady=(15, 5))
-
-        # Title on the left
-        tk.Label(settings_header, text="⚙️ Settings", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 11, "bold")).pack(side="left")
-
-        # Log selection on the right
-        # We wrap these in a sub-frame to keep them grouped together on the right
-        log_sel_frame = tk.Frame(settings_header, bg=self.card_bg)
-        log_sel_frame.pack(side="right")
-
-        ttk.Button(log_sel_frame, text="Browse", command=self.browse_file,
-                  style="Secondary.TButton").pack(side="right", padx=(5, 0))
-
+        # CONFIGURATION PANEL FOR SELECTING THE ACTIVE SOURCE LOG FILE
+        lc, _ = self._card(wrap, "LOG FILE")
+        lc.pack(fill="x", pady=(0, 10))
+        lf = tk.Frame(lc, bg=self.card_bg)
+        lf.pack(fill="x", padx=14, pady=10)
+        tk.Label(lf, text="Log File Path", bg=self.card_bg, fg=self.text_color,
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(0, 4))
+        row = tk.Frame(lf, bg=self.card_bg)
+        row.pack(fill="x")
         self.log_path_var = tk.StringVar(value="info_chat_loot.log")
-        log_entry = tk.Entry(log_sel_frame, textvariable=self.log_path_var, bg="#2d3748", fg=self.text_color,
-                           insertbackground=self.text_color, font=("Segoe UI", 9),
-                           relief="flat", width=45) # Reduced width to fit header
-        log_entry.pack(side="right", padx=5)
+        tk.Entry(row, textvariable=self.log_path_var, bg=self.input_bg, fg=self.text_color,
+                 insertbackground=self.text_color, font=("Segoe UI", 10),
+                 relief="flat", bd=0, highlightthickness=1, 
+                 highlightbackground=self.input_border).pack(side="left", fill="x", expand=True,
+                                           padx=(0, 8), ipady=6, ipadx=4)
+        ttk.Button(row, text="Browse…", command=self.browse_file,
+                   style="Secondary.TButton").pack(side="right")
 
-        tk.Label(log_sel_frame, text="Log File:", bg=self.card_bg, fg=self.muted_text,
-                font=("Segoe UI", 9)).pack(side="right")
+        # ADJUSTABLE PARAMETERS FOR DATA REFRESH RATES AND SLIDING WINDOW SIZES
+        mc, _ = self._card(wrap, "MONITOR SETTINGS")
+        mc.pack(fill="x", pady=(0, 10))
+        mg = tk.Frame(mc, bg=self.card_bg)
+        mg.pack(fill="x", padx=14, pady=10)
 
-        # Settings controls
-        settings_controls = tk.Frame(settings_content, bg=self.card_bg)
-        settings_controls.pack(fill="x", pady=8)
-
-        tk.Label(settings_controls, text="Window:", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 10)).pack(side="left")
         self.window_minutes_var = tk.IntVar(value=120)
-        window_spin = tk.Spinbox(settings_controls, from_=1, to=600, textvariable=self.window_minutes_var,
-                                bg="#2d3748", fg=self.text_color, insertbackground=self.text_color,
-                                font=("Segoe UI", 10), relief="flat", width=8)
-        window_spin.pack(side="left", padx=(10, 20))
+        self.refresh_secs_var   = tk.IntVar(value=3)
+        self.from_start_var     = tk.BooleanVar(value=False)
 
-        tk.Label(settings_controls, text="minutes", bg=self.card_bg, fg=self.muted_text,
-                font=("Segoe UI", 9)).pack(side="left")
+        for r, (lbl, var, frm, to, suf) in enumerate([
+            ("Window Size",  self.window_minutes_var, 1, 600, "minutes"),
+            ("Refresh Rate", self.refresh_secs_var,   1,  60, "seconds"),
+        ]):
+            tk.Label(mg, text=lbl, bg=self.card_bg, fg=self.text_color,
+                     font=("Segoe UI", 10)).grid(row=r, column=0, sticky="w", pady=6, padx=(0, 14))
+            tk.Spinbox(mg, from_=frm, to=to, textvariable=var,
+                       bg=self.input_bg, fg=self.text_color, relief="flat",
+                       insertbackground=self.text_color, font=("Segoe UI", 10),
+                       width=8, buttonbackground=self.input_bg,
+                       highlightthickness=1, highlightbackground=self.input_border).grid(row=r, column=1, sticky="w", pady=6)
+            tk.Label(mg, text=suf, bg=self.card_bg, fg=self.text_color,
+                     font=("Segoe UI", 9)).grid(row=r, column=2, sticky="w", padx=6)
 
-        tk.Label(settings_controls, text="Refresh:", bg=self.card_bg, fg=self.text_color,
-                font=("Segoe UI", 10)).pack(side="left", padx=(20, 0))
-        self.refresh_secs_var = tk.IntVar(value=3)
-        refresh_spin = tk.Spinbox(settings_controls, from_=1, to=60, textvariable=self.refresh_secs_var,
-                                 bg="#2d3748", fg=self.text_color, insertbackground=self.text_color,
-                                 font=("Segoe UI", 10), relief="flat", width=8)
-        refresh_spin.pack(side="left", padx=(10, 20))
+        cb = tk.Frame(mc, bg=self.card_bg)
+        cb.pack(fill="x", padx=14, pady=(0, 12))
+        tk.Checkbutton(cb, text="Read log from the beginning on start",
+                       variable=self.from_start_var,
+                       bg=self.card_bg, fg=self.text_color,
+                       selectcolor=self.input_bg, activebackground=self.card_bg,
+                       activeforeground=self.text_color,
+                       font=("Segoe UI", 10)).pack(anchor="w")
 
-        tk.Label(settings_controls, text="seconds", bg=self.card_bg, fg=self.muted_text,
-                font=("Segoe UI", 9)).pack(side="left")
+    # ── MARKET PAGE: ITEM PRICE DATABASE ACCESS ─────────────────────────
+    def _build_market(self):
+        page = tk.Frame(self.content_area, bg=self.bg_color)
+        self.pages["market"] = page
+        wrap = tk.Frame(page, bg=self.bg_color)
+        wrap.pack(fill="both", expand=True, padx=28, pady=22)
 
-        # From start checkbox
-        self.from_start_var = tk.BooleanVar(value=False)
-        from_start_check = tk.Checkbutton(settings_controls, text="Read from beginning",
-                                         variable=self.from_start_var,
-                                         bg=self.card_bg, fg=self.text_color,
-                                         selectcolor=self.card_bg,
-                                         activebackground=self.card_bg,
-                                         activeforeground=self.text_color,
-                                         font=("Segoe UI", 10))
-        from_start_check.pack(side="left", padx=(20, 0))
-
-        # --- TAB 3: MARKET PRICES ---
-        self.tab_market = tk.Frame(self.notebook, bg=self.bg_color)
-        self.notebook.add(self.tab_market, text=" 🏷️ Market Prices ")
-
-        # Header & Search
-        header = tk.Frame(self.tab_market, bg=self.card_bg, pady=10)
-        header.pack(fill="x")
-        tk.Label(header, text="Market Price Editor", bg=self.card_bg, fg=self.accent_color, font=("Segoe UI", 12, "bold")).pack()
-
-        search_frame = tk.Frame(self.tab_market, bg=self.bg_color, pady=10)
-        search_frame.pack(fill="x", padx=20)
-        tk.Label(search_frame, text="🔍 Search:", bg=self.bg_color, fg=self.text_color).pack(side="left")
+        hrow = tk.Frame(wrap, bg=self.bg_color)
+        hrow.pack(fill="x", pady=(0, 12))
+        tk.Label(hrow, text="🏷️ Market Prices", bg=self.bg_color, fg=self.text_color,
+                 font=("Segoe UI", 16, "bold")).pack(side="left")
+        sf2 = tk.Frame(hrow, bg=self.input_bg, padx=8, pady=4,
+                       highlightthickness=1, highlightbackground=self.input_border)
+        sf2.pack(side="right")
+        tk.Label(sf2, text="🔍", bg=self.input_bg, fg=self.text_color).pack(side="left")
         self.price_search_var = tk.StringVar()
-        self.price_search_var.trace_add("write", lambda *a: self.render_price_list(self.price_search_var.get()))
-        tk.Entry(search_frame, textvariable=self.price_search_var, bg="#2d3748", fg="white", relief="flat").pack(side="left", fill="x", expand=True, padx=10)
+        self.price_search_var.trace_add("write",
+            lambda *a: self.render_price_list(self.price_search_var.get()))
+        tk.Entry(sf2, textvariable=self.price_search_var, bg=self.input_bg,
+                 fg=self.text_color, insertbackground=self.text_color,
+                 relief="flat", font=("Segoe UI", 10), width=24, bd=0).pack(side="left", padx=4)
 
-        # Scrollable View
-        container = tk.Frame(self.tab_market, bg="#2d3748", bd=1, relief="flat")
-        container.pack(fill="both", expand=True, padx=20, pady=10)
+        cont = tk.Frame(wrap, bg=self.card_border, padx=1, pady=1)
+        cont.pack(fill="both", expand=True)
+        inner = tk.Frame(cont, bg=self.card_bg)
+        inner.pack(fill="both", expand=True)
+        self.price_canvas = tk.Canvas(inner, bg=self.card_bg, highlightthickness=0)
+        sc = ttk.Scrollbar(inner, orient="vertical", command=self.price_canvas.yview)
+        self.scrollable_frame = tk.Frame(self.price_canvas, bg=self.card_bg)
+        self.scrollable_frame.bind("<Configure>",
+            lambda e: self.price_canvas.configure(
+                scrollregion=self.price_canvas.bbox("all")))
+        self.price_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.price_canvas.configure(yscrollcommand=sc.set)
 
-        self.price_canvas = tk.Canvas(container, bg=self.bg_color, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.price_canvas.yview)
-        self.scrollable_frame = tk.Frame(self.price_canvas, bg=self.bg_color)
+        def _mwheel(e):
+            self.price_canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+        self.price_canvas.bind("<Enter>",
+            lambda e: self.price_canvas.bind_all("<MouseWheel>", _mwheel))
+        self.price_canvas.bind("<Leave>",
+            lambda e: self.price_canvas.unbind_all("<MouseWheel>"))
 
-        # Fix Scroll: Bind mousewheel ONLY when mouse is over the price list
-        def _on_mousewheel(event):
-            self.price_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-
-        self.price_canvas.bind("<Enter>", lambda e: self.price_canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        self.price_canvas.bind("<Leave>", lambda e: self.price_canvas.unbind_all("<MouseWheel>"))
-
-        self.price_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw", width=400)
-        self.price_canvas.configure(yscrollcommand=scrollbar.set)
         self.price_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        # Initialize the list
+        sc.pack(side="right", fill="y")
         self.row_widgets = []
         self.render_price_list()
 
+    # ── UI BLOCKS: DYNAMIC DUNGEON RUN VISUALIZERS ──────────────────────
+    def create_dungeon_block(self, parent, name, count, bg):
+        f = tk.Frame(parent, bg=bg, padx=14, pady=8,
+                     highlightthickness=1, highlightbackground="#374151")
+        tk.Label(f, text=name.upper(), bg=bg, fg=self.text_color,
+                 font=("Segoe UI", 7, "bold")).pack()
+        tk.Label(f, text=str(count), bg=bg, fg="white",
+                 font=("Segoe UI", 14, "bold")).pack()
+        return f
+
+    def render_dungeon_blocks(self, stats):
+        for w in self.dungeon_blocks.winfo_children():
+            w.destroy()
+        dungeon_data = stats.get("dungeon_runs", {})
+        total_runs   = stats.get("total_dungeon_runs", 0)
+        if total_runs == 0:
+            tk.Label(self.dungeon_blocks, text="No dungeon runs yet.",
+                     bg=self.card_bg, fg=self.text_color,
+                     font=("Segoe UI", 9)).pack(padx=6, pady=4)
+        else:
+            blocks = [("Total", total_runs, "#374151")]
+            for name in DUNGEONS:
+                if name in dungeon_data:
+                    blocks.append((name, dungeon_data[name], DUNGEONS[name]["color"]))
+            
+            for name, count, color in blocks:
+                blk = self.create_dungeon_block(self.dungeon_blocks, name, count, color)
+                blk.pack(side="left", padx=4, pady=4)
+
+    # ── PRICE LISTING: DYNAMIC MARKET TABLE RENDERER ────────────────────
     def render_price_list(self, filter_text=""):
-        # Safety check for initialization
-        if not hasattr(self, 'scrollable_frame') or not hasattr(self, 'row_widgets'):
+        if not hasattr(self, "scrollable_frame") or not hasattr(self, "row_widgets"):
             self.row_widgets = []
             return
-
-        # 1. Clear current rows
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
         self.row_widgets.clear()
 
-        # 2. Render filtered items
-        for name, price in self.price_db.items():
-            if filter_text.lower() in name.lower():
-                f = tk.Frame(self.scrollable_frame, bg=self.bg_color, pady=5)
-                f.pack(fill="x", padx=5)
+        hdr = tk.Frame(self.scrollable_frame, bg=self.input_bg)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Item Name", bg=self.input_bg, fg=self.accent_secondary,
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left", padx=12, pady=6)
+        tk.Label(hdr, text="Price (Yang)", bg=self.input_bg, fg=self.accent_secondary,
+                 font=("Segoe UI", 9, "bold")).pack(side="right", padx=12)
 
-                tk.Label(f, text=name, bg=self.bg_color, fg=self.text_color,
-                         width=25, anchor="w", font=("Segoe UI", 10)).pack(side="left")
+        for i, (name, price) in enumerate(self.price_db.items()):
+            if filter_text.lower() not in name.lower():
+                continue
+            rb = self.card_bg if i % 2 == 0 else "#1d2030"
+            f = tk.Frame(self.scrollable_frame, bg=rb)
+            f.pack(fill="x")
+            tk.Label(f, text=name, bg=rb, fg=self.text_color,
+                     anchor="w", font=("Segoe UI", 10)).pack(side="left", padx=12, pady=5)
+            var = tk.StringVar(value=str(price))
+            var.trace_add("write", lambda *a, n=name, v=var: self.on_price_change(n, v))
+            tk.Entry(f, textvariable=var, bg=self.input_bg, fg=self.accent_color,
+                     width=14, justify="right", relief="flat",
+                     font=("Segoe UI", 10, "bold"), bd=0,
+                     insertbackground=self.text_color,
+                     highlightthickness=1, highlightbackground=self.input_border).pack(side="right", padx=10, pady=4, ipady=3)
+            self.row_widgets.append((name, var))
 
-                var = tk.StringVar(value=str(price))
-                var.trace_add("write", lambda *args, n=name, v=var: self.on_price_change(n, v))
-
-                e = tk.Entry(f, textvariable=var, bg="#16213e", fg=self.accent_secondary,
-                             width=12, justify="center", relief="flat", font=("Segoe UI", 10, "bold"))
-                e.pack(side="right", padx=5)
-
-                self.row_widgets.append((name, var))
-
-        # 3. CRITICAL FIX FOR SEARCH: Update canvas scroll area
         self.scrollable_frame.update_idletasks()
         self.price_canvas.configure(scrollregion=self.price_canvas.bbox("all"))
-
-        # Reset scroll to top when searching so results are visible
         if filter_text:
             self.price_canvas.yview_moveto(0)
 
+    # ── MINI MODE: COMPACT OVERLAY WINDOW LOGIC ─────────────────────────
     def toggle_mini_window(self):
-        """Toggles the mini window on and off."""
-        # If window exists, close it and clean up
-        if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
+        if hasattr(self, "mini_win") and self.mini_win \
+                and self.mini_win.winfo_exists():
             self.mini_win.destroy()
             self.mini_win = None
-            self.deiconify() # Show main window
+            self.deiconify()
             self.attributes("-alpha", 1.0)
             return
-
-        # Otherwise, create it
         self.attributes("-alpha", 0.0)
         self.withdraw()
+        mw = tk.Toplevel(self)
+        self.mini_win = mw
+        mw.attributes("-topmost", True)
+        mw.overrideredirect(True)
+        mw.geometry("240x190")
+        if self.mini_pos:
+            mw.geometry(f"240x190{self.mini_pos}")
+            
+        mw.configure(bg="#111318")
+        tk.Frame(mw, bg=self.accent_color, height=3).pack(fill="x")
 
-        self.mini_win = tk.Toplevel(self)
-        self.mini_win.attributes("-topmost", True)
-        self.mini_win.overrideredirect(True) # Borderless
-        self.mini_win.geometry("220x140")
-        self.mini_win.configure(bg="#1a1a2e")
+        def _start(e): mw.x, mw.y = e.x, e.y
+        def _move(e):
+            new_x = mw.winfo_x() + e.x - mw.x
+            new_y = mw.winfo_y() + e.y - mw.y
+            self.mini_pos = f"+{new_x}+{new_y}"
+            mw.geometry(f"240x190{self.mini_pos}")
+            self.save_data() # Persist position
 
-        # Draggable logic
-        def start_move(event): self.mini_win.x, self.mini_win.y = event.x, event.y
-        def on_move(event):
-            deltax = event.x - self.mini_win.x
-            deltay = event.y - self.mini_win.y
-            self.mini_win.geometry(f"+{self.mini_win.winfo_x() + deltax}+{self.mini_win.winfo_y() + deltay}")
+        mw.bind("<Button-1>", _start)
+        mw.bind("<B1-Motion>", _move)
 
-        self.mini_win.bind("<Button-1>", start_move)
-        self.mini_win.bind("<B1-Motion>", on_move)
-
-        tk.Label(self.mini_win, text="LOOT ANALYZER", fg="#94a3b8", bg="#1a1a2e", font=("Segoe UI", 7, "bold")).pack()
-
-        # UI Elements
-        self.mini_yang = tk.Label(self.mini_win, text="Total Yang: 0", fg=self.accent_color, bg="#1a1a2e", font=("Segoe UI", 11, "bold"))
-        self.mini_yang.pack(pady=(2))
-
-        self.mini_hr = tk.Label(self.mini_win, text="Total Yang/h: 0", fg=self.accent_secondary, bg="#1a1a2e", font=("Segoe UI", 10))
-        self.mini_hr.pack(pady=(2))
-
-        self.mini_min = tk.Label(self.mini_win, text="Total Yang/m: 0", fg="#f59e0b", bg="#1a1a2e", font=("Segoe UI", 10))
+        tk.Label(mw, text="⚔ JINTEIA TRACKER", fg=self.text_color,
+                 bg="#111318", font=("Segoe UI", 7, "bold")).pack(pady=(4, 0))
+        self.mini_yang = tk.Label(mw, text="Total: —", fg=self.accent_color,
+                                  bg="#111318", font=("Segoe UI", 13, "bold"))
+        self.mini_yang.pack(pady=(5, 0))
+        self.mini_hr   = tk.Label(mw, text="/hr: —", fg=self.accent_secondary,
+                                  bg="#111318", font=("Segoe UI", 10))
+        self.mini_hr.pack()
+        self.mini_min  = tk.Label(mw, text="/min: —", fg=self.accent_amber,
+                                  bg="#111318", font=("Segoe UI", 10))
         self.mini_min.pack()
 
-        # Restore Button
-        exit_btn = tk.Label(self.mini_win, text="[ BACK TO DASHBOARD ]", fg="#f59e0b", bg="#1a1a2e", font=("Segoe UI", 8, "bold"), cursor="hand2")
-        exit_btn.pack(pady=10)
-        exit_btn.bind("<Button-1>", lambda e: self.toggle_mini_window())
+        self.mini_stop_btn = tk.Label(mw, text="⏹ STOP MONITOR", fg="#ff4444",
+                                      bg="#111318", font=("Segoe UI", 8, "bold"), 
+                                      cursor="hand2", padx=10, pady=5)
+        self.mini_stop_btn.pack(pady=(5, 0))
+        self.mini_stop_btn.bind("<Button-1>", lambda e: self.stop_monitor())
 
-    def create_dungeon_block(self, parent, name, count, bg):
-        """Creates a styled card for a dungeon run."""
-        frame = tk.Frame(parent, bg=bg, padx=12, pady=8, highlightthickness=1, highlightbackground="#374151")
-        tk.Label(frame, text=name.upper(), bg=bg, fg=self.text_color, font=("Segoe UI", 8, "bold")).pack()
-        tk.Label(frame, text=str(count), bg=bg, fg="white", font=("Segoe UI", 14, "bold")).pack()
-        return frame
+        # If not running, show it as disabled
+        if self.worker is None:
+            self.mini_stop_btn.configure(text="▶ START MONITOR", fg=self.accent_color)
+            self.mini_stop_btn.bind("<Button-1>", lambda e: self.start_monitor())
 
-    def render_dungeon_blocks(self, stats):
-        # Clear old blocks
-        for widget in self.dungeon_blocks.winfo_children():
-            widget.destroy()
+        back = tk.Label(mw, text="[ BACK TO DASHBOARD ]", fg=self.accent_color,
+                        bg="#111318", font=("Segoe UI", 7, "bold"), cursor="hand2")
+        back.pack(pady=10)
+        back.bind("<Button-1>", lambda e: self.toggle_mini_window())
 
-        dungeon_data = stats.get("dungeon_runs", {})
-        total_runs = stats.get("total_dungeon_runs", 0)
-
-        if total_runs == 0:
-            self.create_dungeon_block(self.dungeon_blocks, "No Runs", 0, self.card_bg).pack(side="left", padx=5)
-        else:
-            # Render Total Block
-            self.create_dungeon_block(self.dungeon_blocks, "Total", total_runs, "#374151").pack(side="left", padx=5)
-
-            # Render Individual Dungeons (Sorted by name)
-            for name in DUNGEONS.keys():
-              if name in dungeon_data:
-                  color = DUNGEONS[name]["color"]
-                  count = dungeon_data[name]
-                  self.create_dungeon_block(self.dungeon_blocks, name, count, color).pack(side="left", padx=2)
-
-    # -------------------- UI helpers -------------------- #
-
+    # ── CORE HELPERS: UI SYNC AND DATA FORMATTING ───────────────────────
     def reset_stats_ui(self):
-        """Clear stats and item list for a fresh start."""
-        self.interval_label.config(text="Not started", fg=self.muted_text)
-        self.window_length_label.config(text="0.00 h", fg=self.muted_text)
-        self.yang_label.config(text="0", fg=self.accent_color)
-        self.yang_per_hour_label.config(text="0", fg=self.accent_secondary)
-        self.yang_per_minute_label.config(text="0", fg="#f59e0b")
-        self.total_worth_label.config(text="0", fg="#10b981")
-        self.total_worth_hr_label.config(text="0", fg="#34d399")
-        self.total_worth_min_label.config(text="0", fg="#6ee7b7")
+        for lbl, txt, col in [
+            (self.yang_label,            "—", self.accent_color),
+            (self.yang_per_hour_label,   "—", self.accent_secondary),
+            (self.yang_per_minute_label, "—", self.accent_amber),
+            (self.total_worth_label,     "—", "#10b981"),
+            (self.total_worth_hr_label,  "—", "#34d399"),
+            (self.total_worth_min_label, "—", "#6ee7b7"),
+            (self.interval_label,        "Not started", self.text_color),
+            (self.window_length_label,   "—", self.text_color),
+        ]:
+            lbl.configure(text=txt, fg=col)
         self.tree.delete(*self.tree.get_children())
+        for w in self.dungeon_blocks.winfo_children():
+            w.destroy()
 
-    def update_status(self, text: str):
-        """Updates the text in the status bar."""
+    def update_status(self, text):
         self.status_var.set(text)
 
     def load_prices(self):
-      self.price_db = {}
-      path = "prices.json"
-      if os.path.exists(path):
-          try:
-              with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                  self.price_db = data
-          except (json.JSONDecodeError, OSError):
+        self.price_db = {}
+        path = "prices.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    if isinstance(d, dict):
+                        self.price_db = d
+            except (json.JSONDecodeError, OSError):
                 self.price_db = {}
-      else:
-          # Default example file
-          self.price_db = {"Shard": 1000}
-          with open(path, "w", encoding="utf-8") as f:
-              json.dump(self.price_db, f, indent=4)
+        else:
+            self.price_db = {"Shard": 1000}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.price_db, f, indent=4)
 
     def on_price_change(self, name, var):
-        """Update database and file immediately on keystroke."""
         try:
-            new_val = int(var.get())
-            self.price_db[name] = new_val
-            # Update the worker's DB so the next calculation uses the new price
+            self.price_db[name] = int(var.get())
             if self.worker:
                 self.worker.price_db = self.price_db
             self.save_data()
         except ValueError:
-            pass # Ignore non-numeric input during typing
+            pass
 
     def save_data(self):
-        with open("prices.json", "w") as f: json.dump(self.price_db, f)
-        with open("bookmarks.json", "w") as f: json.dump(list(self.bookmarks), f)
+        with open("prices.json", "w") as f:
+            json.dump(self.price_db, f)
+        with open("bookmarks.json", "w") as f:
+            json.dump(list(self.bookmarks), f)
+
+    def load_bookmarks(self):
+        self.bookmarks = set()
+        path = "bookmarks.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    self.bookmarks = set(json.load(f))
+            except Exception as e:
+                print(f"Error loading bookmarks: {e}")
 
     def refresh_treeview_filtered(self):
         if not self.last_received_stats:
             return
-
-        search_query = self.loot_search_var.get().lower().strip()
+        sq = self.loot_search_var.get().lower().strip()
         self.tree.delete(*self.tree.get_children())
+        items   = self.last_received_stats.get("items", [])
+        pinned  = [i for i in items if i[0] in self.bookmarks]
+        others  = [i for i in items if i[0] not in self.bookmarks]
 
-        items_list = self.last_received_stats.get("items", [])
+        def _ins(batch, is_pin):
+            for name, qty, ph, val in batch:
+                if sq and sq not in name.lower():
+                    continue
+                tag  = "pinned" if is_pin else "normal"
+                icon = "⭐" if is_pin else "☆"
+                self.tree.insert("", "end",
+                    values=(icon, name, f"{qty:,}", f"{ph:,}", f"{val:,}"),
+                    tags=(tag,))
 
-        # Sort items: Pinned vs Others
-        pinned_items = [i for i in items_list if i[0] in self.bookmarks]
-        other_items = [i for i in items_list if i[0] not in self.bookmarks]
-
-        def insert_batch(batch, is_pinned):
-            for name, qty, per_hour, val in batch:
-                if not search_query or search_query in name.lower():
-                    # Solid star for pinned, hollow for not
-                    icon = "⭐" if is_pinned else "☆"
-
-                    # Tagging for colors
-                    tag = 'pinnedrow' if is_pinned else 'normalrow'
-
-                    self.tree.insert("", "end", values=(
-                        icon, name, f"{qty:,}", f"{per_hour:,}", f"{val:,}"
-                    ), tags=(tag,))
-
-        insert_batch(pinned_items, True)
-        insert_batch(other_items, False)
-
-        # Make the default icons a bit more muted
-        self.tree.tag_configure('normalrow', foreground=self.text_color)
-        self.tree.tag_configure('pinnedrow', background='#2d2d1a', foreground="#fbbf24")
+        _ins(pinned, True)
+        _ins(others, False)
+        self.tree.tag_configure("pinned", background="#2a2a14", foreground="#fbbf24")
+        self.tree.tag_configure("normal", foreground=self.text_color)
 
     def refresh_last_stats(self):
-      """Helper for the search trace to update the UI immediately."""
-      self.refresh_treeview_filtered()
-
-    def load_bookmarks(self):
-      """Load bookmarked item names from bookmarks.json."""
-      self.bookmarks = set()
-      path = "bookmarks.json"
-      if os.path.exists(path):
-          try:
-              with open(path, "r", encoding="utf-8") as f:
-                  data = json.load(f)
-                  self.bookmarks = set(data)
-          except Exception as e:
-              print(f"Error loading bookmarks: {e}")
+        self.refresh_treeview_filtered()
 
     def on_tree_click(self, event):
-        region = self.tree.identify_region(event.x, event.y)
-        column = self.tree.identify_column(event.x)
-        item_id = self.tree.identify_row(event.y)
-
-        if not item_id:
+        col = self.tree.identify_column(event.x)
+        iid = self.tree.identify_row(event.y)
+        if not iid or col != "#1":
             return
-
-        # Check if the click was in the first column (#1 is the Bookmark column)
-        if column == "#1":
-            item_values = self.tree.item(item_id, "values")
-            item_name = item_values[1] # Name is in the second column
-
-            if item_name in self.bookmarks:
-                self.bookmarks.remove(item_name)
-            else:
-                self.bookmarks.add(item_name)
-
-            self.save_data()
-            self.refresh_last_stats()
+        name = self.tree.item(iid, "values")[1]
+        if name in self.bookmarks:
+            self.bookmarks.remove(name)
+        else:
+            self.bookmarks.add(name)
+        self.save_data()
+        self.refresh_last_stats()
 
     def format_yang_short(self, amount):
-        # Handle zero or negative values to avoid math domain errors
         if amount <= 0:
             return "0"
-
-        # Your custom suffixes
         suffixes = ["", "k", "kk", "kkk", "kkkk"]
-
-        # Calculate the magnitude (index)
-        # math.log10(amount) / 3 tells us how many groups of 3 zeros there are
-        i = int(math.floor(math.log10(amount) / 3))
-
-        # Ensure the index doesn't exceed the available suffixes
-        i = min(i, len(suffixes) - 1)
-
+        i = min(int(math.floor(math.log10(amount) / 3)), len(suffixes) - 1)
         if i == 0:
             return str(amount)
+        return "{:.1f}".format(amount / (1000 ** i)).rstrip("0").rstrip(".") + suffixes[i]
 
-        # Calculate the shortened value
-        value = amount / (1000 ** i)
-
-        # Format to 1 decimal place and strip ".0" if it's a whole number
-        return "{:.1f}".format(value).rstrip('0').rstrip('.') + suffixes[i]
-
-    # -------------------- UI callbacks -------------------- #
-
+    # ── MONITORING: START AND STOP CONTROL LOGIC ────────────────────────
     def browse_file(self):
-        filename = filedialog.askopenfilename(
-            title="Select log file", filetypes=[("Log files", "*.log *.txt"), ("All files", "*.*")]
-        )
-        if filename:
-            self.log_path_var.set(filename)
+        fn = filedialog.askopenfilename(
+            title="Select log file",
+            filetypes=[("Log files", "*.log *.txt"), ("All files", "*.*")])
+        if fn:
+            self.log_path_var.set(fn)
 
     def start_monitor(self):
         if self.worker is not None:
             messagebox.showinfo("Info", "Monitor is already running.")
             return
-
         path = self.log_path_var.get().strip()
         if not path:
             messagebox.showerror("Error", "Please select a log file.")
             return
-
-        # Wipe UI data and start fresh
         self.reset_stats_ui()
-
-        window_minutes = self.window_minutes_var.get()
-        refresh_secs = self.refresh_secs_var.get()
-        from_start = self.from_start_var.get()
-
         self.stop_event = threading.Event()
         self.worker = LiveMonitorWorker(
             path=path,
-            window_minutes=window_minutes,
-            refresh_secs=refresh_secs,
-            from_start=from_start,
+            window_minutes=self.window_minutes_var.get(),
+            refresh_secs=self.refresh_secs_var.get(),
+            from_start=self.from_start_var.get(),
             update_callback=self.schedule_update_stats,
             stop_event=self.stop_event,
+            new_event_callback=self._on_new_event
         )
         self.worker.price_db = self.price_db
         self.worker.start()
-
-        self.start_button.config(state="disabled")
-        self.stop_button.config(state="normal")
+        self.start_button.configure(state="disabled", bg="#1a3a1a")
+        self.stop_button.configure(state="normal")
+        self.live_dot.configure(fg=self.accent_color)
+        self._animate_status_glow()
+        if hasattr(self, "mini_stop_btn") and self.mini_stop_btn.winfo_exists():
+            self.mini_stop_btn.configure(text="⏹ STOP MONITOR", fg="#ff4444")
+            self.mini_stop_btn.bind("<Button-1>", lambda e: self.stop_monitor())
 
     def stop_monitor(self):
         if self.worker is not None:
             self.stop_event.set()
-            # Ensure worker has time to close the file
             self.worker.join(timeout=1.0)
             self.worker = None
-
-        # Keep the data in the UI, just re-enable Start
-        self.start_button.config(state="normal")
-        self.stop_button.config(state="disabled")
+        self.start_button.configure(state="normal", bg=self.accent_color)
+        self.stop_button.configure(state="disabled")
+        self.live_dot.configure(fg=self.text_color)
+        # Stopped state for glow
+        self.glow_val = 255 
+        if hasattr(self, "mini_stop_btn") and self.mini_stop_btn.winfo_exists():
+            self.mini_stop_btn.configure(text="▶ START MONITOR", fg=self.accent_color)
+            self.mini_stop_btn.bind("<Button-1>", lambda e: self.start_monitor())
 
     def on_close(self):
         self.stop_monitor()
         self.destroy()
 
-    # -------------------- Stats update -------------------- #
-
+    # ── STATS PROCESSING: REAL-TIME UI DATA UPDATING ────────────────────
     def schedule_update_stats(self, stats: Dict):
-        """
-        Called from the worker thread.
-        We must schedule the actual UI update on the Tkinter main thread using after().
-        """
         self.after(0, self.update_stats, stats)
 
     def update_stats(self, stats: Dict):
         self.last_received_stats = stats
-        self.refresh_treeview_filtered()
-
         if "status" in stats:
             self.update_status(stats["status"])
-            if len(stats) == 1: # If it's only a status update, stop here
+            if len(stats) == 1:
                 return
-
         if "error" in stats:
             messagebox.showerror("Error", stats["error"])
             self.update_status("Error occurred.")
             self.stop_monitor()
             return
 
-        start = stats["start"]
-        end = stats["end"]
-        hours = stats["hours"]
+        start   = stats["start"]
+        end     = stats["end"]
+        hours   = stats["hours"]
         minutes = stats["minutes"]
-        dropped_yang = stats["dropped_yang"]
-        yang_per_hour = stats["yang_per_hour"]
-        yang_per_minute = stats["yang_per_minute"]
-        items_list = stats["items"]
+        dy      = stats["dropped_yang"]
+        dy_hr   = stats["yang_per_hour"]
+        dy_min  = stats["yang_per_minute"]
+        items   = stats["items"]
 
-        # Update time info
+        # FORMAT AND DISPLAY THE START AND END TIMES OF THE CURRENT ANALYSIS WINDOW
         if start.date() != end.date():
-            # Shows: 24/11 22:30:05 -> 25/11 01:15:00
-            time_str = f"{start.strftime('%d/%m %H:%M:%S')} → {end.strftime('%d/%m %H:%M:%S')}"
+            ts = f"{start.strftime('%d/%m %H:%M:%S')} → {end.strftime('%d/%m %H:%M:%S')}"
         else:
-            # Standard view for single-day sessions
-            time_str = f"{start.strftime('%H:%M:%S')} → {end.strftime('%H:%M:%S')}"
-
-        self.interval_label.config(
-            text=time_str,
-            fg=self.text_color
-        )
+            ts = f"{start.strftime('%H:%M:%S')} → {end.strftime('%H:%M:%S')}"
+        self.interval_label.configure(text=ts, fg=self.text_color)
 
         if hours >= 24:
-            days = int(hours // 24)
-            rem_hours = hours % 24
-            window_txt = f"{days} Days {rem_hours:.1f} Hours ({stats['minutes']:.1f} Minutes)"
+            d = int(hours // 24)
+            wt = f"{d} Days {hours%24:.1f} Hours ({minutes:.0f} Minutes)"
         else:
-            window_txt = f"{hours:.2f} Hours ({stats['minutes']:.1f} Minutes)"
+            wt = f"{hours:.2f} Hours ({minutes:.0f} Minutes)"
+        self.window_length_label.configure(text=wt, fg=self.text_color)
 
-        self.window_length_label.config(text=window_txt, fg=self.text_color)
+        self.yang_label.configure(
+            text=f"{dy:,} ({self.format_yang_short(dy)})")
+        self.yang_per_hour_label.configure(
+            text=f"{dy_hr:,}  ({self.format_yang_short(dy_hr)})")
+        self.yang_per_minute_label.configure(
+            text=f"{dy_min:,}  ({self.format_yang_short(dy_min)})")
 
-        # Update yang stats
-        self.yang_label.config(text=f"{dropped_yang:,} ({self.format_yang_short(dropped_yang)}) Yang")
-        self.yang_per_hour_label.config(text=f"{yang_per_hour:,} ({self.format_yang_short(yang_per_hour)}) Yang")
-        self.yang_per_minute_label.config(text=f"{yang_per_minute:,} ({self.format_yang_short(yang_per_minute)}) Yang")
+        mat  = sum(i[3] for i in items)
+        nw   = dy + mat
+        nwhr = int(round(nw / hours))   if hours   > 0 else 0
+        nwmn = int(round(nw / minutes)) if minutes > 0 else 0
+        self.total_worth_label.configure(
+            text=f"{nw:,}  ({self.format_yang_short(nw)})")
+        self.total_worth_hr_label.configure(
+            text=f"{nwhr:,}  ({self.format_yang_short(nwhr)})")
+        self.total_worth_min_label.configure(
+            text=f"{nwmn:,}  ({self.format_yang_short(nwmn)})")
 
-        # Calculate Material Value
-        material_value = sum(item[3] for item in stats["items"])
-
-        total_net_worth = dropped_yang + material_value
-        total_worth_per_hour = int(round(total_net_worth / hours)) if hours > 0 else 0
-        total_worth_per_minute = int(round(total_net_worth / minutes)) if minutes > 0 else 0
-
-        self.total_worth_label.config(
-            text=f"{total_net_worth:,} ({self.format_yang_short(total_net_worth)}) Yang"
-        )
-        self.total_worth_hr_label.config(
-            text=f"{total_worth_per_hour:,} ({self.format_yang_short(total_worth_per_hour)}) Yang"
-        )
-        self.total_worth_min_label.config(
-            text=f"{total_worth_per_minute:,} ({self.format_yang_short(total_worth_per_minute)}) Yang"
-        )
-
-        if hasattr(self, 'mini_win') and self.mini_win is not None and self.mini_win.winfo_exists():
+        # UPDATE MINI-PLAYER OVERLAY WITH REAL-TIME STATISTICAL SNAPSHOTS
+        if hasattr(self, "mini_win") and self.mini_win \
+                and self.mini_win.winfo_exists():
             try:
-                total_net_worth = dropped_yang + material_value
-                total_worth_per_hour = int(round(total_net_worth / hours)) if hours > 0 else 0
-
-                self.mini_yang.config(text=f"Total: {total_net_worth:,} ({self.format_yang_short(total_net_worth)})")
-                self.mini_hr.config(text=f"Total/Hr: {total_worth_per_hour:,} ({self.format_yang_short(total_worth_per_hour)})")
-                self.mini_min.config(text=f"Total/Min: {total_worth_per_minute:,} ({self.format_yang_short(total_worth_per_minute)})")
+                self.mini_yang.configure(text=f"Total: {self.format_yang_short(nw)} Yang")
+                self.mini_hr.configure(  text=f"/hr:   {self.format_yang_short(nwhr)}")
+                self.mini_min.configure( text=f"/min:  {self.format_yang_short(nwmn)}")
             except Exception:
                 pass
 
-        # Render the dynamic Dungeon blocks
         self.render_dungeon_blocks(stats)
+        self.refresh_treeview_filtered()
+        self._refresh_sound_item_list()
 
-        # Update items tree
-        self.tree.delete(*self.tree.get_children())
-        for idx, (name, qty, per_hour, val ) in enumerate(items_list):
-            # Alternate row colors
-            tag = 'evenrow' if idx % 2 == 0 else 'oddrow'
-
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    name,
-                    f"{qty:,}",
-                    f"{per_hour:,}",
-                    f"{val:,}" # Show the total value of that stack
-                ),
-                tags=(tag,)
-            )
-
-        # Configure row colors
-        self.tree.tag_configure('evenrow', background='#2d3748', foreground=self.text_color)
-        self.tree.tag_configure('oddrow', background='#374151', foreground=self.text_color)
-
-        # Check for new items to add to price DB
-        new_item = False
-        for item in stats['items']:
+        # AUTOMATICALLY REGISTER NEWLY DISCOVERED ITEMS INTO THE MARKET PRICE DATABASE
+        changed = False
+        for item in items:
             if item[0] not in self.price_db:
                 self.price_db[item[0]] = 0
-                new_item = True
-        if new_item:
+                changed = True
+        if changed:
             self.render_price_list()
             self.save_data()
+            self._refresh_sound_item_list()
 
-        self.refresh_treeview_filtered()
+        pc = stats.get("processed_count", 0)
+        li = stats.get("last_item", "—")
+        self.update_status(
+            f"Read: {pc} lines (Last Drop: {li})  ·  "
+            f"Updated {end.strftime('%H:%M:%S')}  ·  "
+            f"{len(items)} different items  ·  "
+            f"Yang: {self.format_yang_short(nw)}")
+
+    # ── AUDIO LOGIC: SOUND TRIGGERING AND PLAYBACK ──────────────────────
+    def _on_new_event(self, ev: LootEvent):
+        if not ev.is_yang:
+            self.trigger_drop_sound(ev.item)
+
+    def trigger_drop_sound(self, item_name):
+        if not self.drop_sounds_enabled.get():
+            return
+        for rule in self.drop_sounds:
+            if rule["item"] == item_name:
+                path = rule.get("sound")
+                dur = rule.get("duration", self.default_sound_duration.get())
+                if path:
+                    threading.Thread(target=self._play_rule_sounds,
+                                     args=(path, dur), daemon=True).start()
+
+    def _get_sound(self, path):
+        if not hasattr(self, "sound_cache"): self.sound_cache = {}
+        if path not in self.sound_cache:
+            try:
+                self.sound_cache[path] = pygame.mixer.Sound(path)
+            except: return None
+        return self.sound_cache.get(path)
+
+    def _play_rule_sounds(self, path, duration):
+        if not path or not os.path.exists(path): return
+        try:
+            snd = self._get_sound(path)
+            if snd:
+                ch = snd.play()
+                if ch:
+                    if duration > 0:
+                        self.after(int(duration * 1000), ch.stop)
+        except: pass
+
+    # ── DROP SOUNDS: ADVANCED AUDIO RULES INTERFACE ─────────────────────
+    def _build_sounds(self):
+        page = tk.Frame(self.content_area, bg=self.bg_color)
+        self.pages["sounds"] = page
+        
+        wrap = tk.Frame(page, bg=self.bg_color)
+        wrap.pack(fill="both", expand=True, padx=28, pady=22)
+        
+        row_h = tk.Frame(wrap, bg=self.bg_color)
+        row_h.pack(fill="x", pady=(0, 14))
+        tk.Label(row_h, text="🔊  Drop Sounds", bg=self.bg_color, fg=self.text_color,
+                 font=("Segoe UI", 16, "bold")).pack(side="left")
+
+        # Global Settings Card
+        gc, _ = self._card(wrap, "GLOBAL SETTINGS")
+        gc.pack(fill="x", pady=(0, 10))
+        gf = tk.Frame(gc, bg=self.card_bg)
+        gf.pack(fill="x", padx=14, pady=10)
+        
+        tk.Checkbutton(gf, text="Enable Drop Sounds", variable=self.drop_sounds_enabled,
+                       bg=self.card_bg, fg=self.accent_color, selectcolor=self.bg_color,
+                       activebackground=self.card_bg, activeforeground=self.accent_color,
+                       font=("Segoe UI", 10, "bold"), command=self.save_sounds).pack(side="left")
+        
+        tk.Label(gf, text="Default Stop (s):", bg=self.card_bg, fg=self.text_color).pack(side="left", padx=(30, 6))
+        tk.Spinbox(gf, from_=0.0, to=300.0, increment=0.5, textvariable=self.default_sound_duration,
+                   width=5, bg=self.input_bg, fg=self.text_color, relief="flat", buttonbackground=self.input_bg,
+                   highlightthickness=1, highlightbackground=self.input_border,
+                   command=self.save_sounds).pack(side="left")
+
+        # Add Rule Card
+        ac, _ = self._card(wrap, "ADD NEW RULE")
+        ac.pack(fill="x", pady=(0, 10))
+        af = tk.Frame(ac, bg=self.card_bg)
+        af.pack(fill="x", padx=14, pady=10)
+        
+        # Row 1: Item & Priority
+        r1 = tk.Frame(af, bg=self.card_bg)
+        r1.pack(fill="x", pady=4)
+        tk.Label(r1, text="Item Name / Pattern", bg=self.card_bg, fg=self.text_color, font=("Segoe UI", 9)).pack(side="left")
+        self.new_rule_item_var = tk.StringVar()
+        self.item_combo = ttk.Combobox(r1, textvariable=self.new_rule_item_var, width=35)
+        self.item_combo.pack(side="left", padx=10)
+        self._refresh_sound_item_list()
+        
+        tk.Label(r1, text="Priority:", bg=self.card_bg, fg=self.text_color).pack(side="left", padx=(10, 0))
+        self.new_rule_prio_var = tk.IntVar(value=1)
+        ttk.Combobox(r1, textvariable=self.new_rule_prio_var, values=[1,2,3,4,5], width=3).pack(side="left", padx=5)
+
+        # Row 2: File
+        r2 = tk.Frame(af, bg=self.card_bg)
+        r2.pack(fill="x", pady=8)
+        tk.Label(r2, text="Sound File:", bg=self.card_bg, fg=self.text_color, font=("Segoe UI", 9)).pack(side="left")
+        self.new_rule_sound_var = tk.StringVar()
+        tk.Entry(r2, textvariable=self.new_rule_sound_var, bg=self.input_bg, fg=self.text_color,
+                 relief="flat", bd=0, font=("Segoe UI", 9),
+                 highlightthickness=1, highlightbackground=self.input_border).pack(side="left", fill="x", expand=True, padx=10)
+        
+        ttk.Button(r2, text="Browse", command=self.add_drop_sound_files, style="Secondary.TButton").pack(side="right")
+
+        # Row 3: Action
+        r3 = tk.Frame(af, bg=self.card_bg)
+        r3.pack(fill="x", pady=4)
+        tk.Label(r3, text="Specific Stop (s):", bg=self.card_bg, fg=self.text_color, font=("Segoe UI", 8)).pack(side="left")
+        self.new_rule_dur_var = tk.DoubleVar(value=0.0)
+        tk.Spinbox(r3, from_=0.0, to=300.0, increment=0.5, textvariable=self.new_rule_dur_var,
+                   width=5, bg=self.input_bg, fg=self.text_color, relief="flat", buttonbackground=self.input_bg,
+                   highlightthickness=1, highlightbackground=self.input_border).pack(side="left", padx=5)
+        tk.Label(r3, text="(0 = use default - (set sound length to stop long sounds))", bg=self.card_bg, fg=self.muted_text, font=("Segoe UI", 8)).pack(side="left")
+        
+        ttk.Button(r3, text="➕ Add Rule", command=self.save_new_rule, style="Accent.TButton").pack(side="right")
+
+        # Table Card
+        tc, _ = self._card(wrap, "ACTIVE RULES", accent=False)
+        tc.pack(fill="both", expand=True)
+        self.sounds_tree = ttk.Treeview(tc, columns=("item", "prio", "files", "dur"), show="headings", height=8)
+        for cid, txt, w in [("item","Pattern",180), ("prio","Priority",50), ("files","Sound Files",300), ("dur","Stop (s)",80)]:
+            self.sounds_tree.heading(cid, text=txt)
+            self.sounds_tree.column(cid, width=w, anchor="center" if cid!="item" else "w")
+        self.sounds_tree.pack(fill="both", expand=True)
+        
+        # Action row
+        low = tk.Frame(tc, bg=self.card_bg, padx=10, pady=8)
+        low.pack(fill="x")
+        ttk.Button(low, text="🔊 Test Selected", command=self.test_rule_sound, style="Secondary.TButton").pack(side="left")
+        ttk.Button(low, text="🗑️ Delete Selected", command=self.delete_rule, style="Danger.TButton").pack(side="right")
+        
+        self.refresh_drop_sounds_table()
+
+    def _refresh_sound_item_list(self):
+        if not hasattr(self, "item_combo"): return
+        
+        # 1. Start with items from the session stats (if available)
+        session_items = []
+        pinned_session = []
+        normal_session = []
+        
+        if self.last_received_stats and "items" in self.last_received_stats:
+            for item in self.last_received_stats["items"]:
+                name = item[0]
+                if name in getattr(self, "bookmarks", set()):
+                    pinned_session.append(name)
+                else:
+                    normal_session.append(name)
+        
+        # 2. Get all other items from price_db and DUNGEONS
+        all_db = set(self.price_db.keys())
+        for d_info in DUNGEONS.values():
+            for d_item in d_info.get("items", []):
+                all_db.add(d_item)
+
+        # Remove those already in session list
+        seen = set(pinned_session) | set(normal_session)
+        others = sorted(list(all_db - seen))
+        
+        # 3. Combine: Pinned Session -> Normal Session -> Rest of DB (Alpha)
+        self.item_combo['values'] = pinned_session + normal_session + others
+
+    def add_drop_sound_files(self):
+        f = filedialog.askopenfilename(title="Select Sound File", filetypes=[("Audio Files", "*.mp3 *.wav")])
+        if f: self.new_rule_sound_var.set(f)
+
+    def save_new_rule(self):
+        item = self.new_rule_item_var.get().strip()
+        if not item: return
+        sound = self.new_rule_sound_var.get().strip()
+        if not sound: return
+        self.drop_sounds.append({
+            "item": item, "priority": self.new_rule_prio_var.get(),
+            "sound": sound, "duration": self.new_rule_dur_var.get()
+        })
+        self.save_sounds()
+        self.refresh_drop_sounds_table()
+        self.new_rule_item_var.set("")
+        self.new_rule_sound_var.set("")
+        self.new_rule_dur_var.set(0.0)
+
+    def refresh_drop_sounds_table(self):
+        self.sounds_tree.delete(*self.sounds_tree.get_children())
+        for i, rule in enumerate(self.drop_sounds):
+            f_str = os.path.basename(rule.get('sound', 'No file'))
+            d_str = f"{rule['duration']}s" if rule['duration'] > 0 else "Default"
+            self.sounds_tree.insert("", "end", iid=i, values=(rule['item'], rule['priority'], f_str, d_str))
+
+    def delete_rule(self):
+        sel = self.sounds_tree.selection()
+        if not sel: return
+        idx = int(sel[0])
+        del self.drop_sounds[idx]
+        self.save_sounds()
+        self.refresh_drop_sounds_table()
+
+    def test_rule_sound(self):
+        sel = self.sounds_tree.selection()
+        if not sel: return
+        rule = self.drop_sounds[int(sel[0])]
+        threading.Thread(target=self._play_rule_sounds,
+                         args=(rule.get('sound'), rule.get('duration', self.default_sound_duration.get())),
+                         daemon=True).start()
+
+    # ── PERSISTENCE: LOAD AND SAVE LOCAL CONFIGURATIONS ─────────────────
+    def load_data(self):
+        # RETRIEVE PREVIOUSLY SAVED MINI-WINDOW COORDINATES FROM THE LOCAL CONFIG FILE
+        if os.path.exists("mini_pos.json"):
+            try:
+                with open("mini_pos.json", "r") as f:
+                    self.mini_pos = json.load(f)
+            except: pass
+
+    def save_data(self):
+        # Bookmarks
+        with open("bookmarks.json", "w", encoding="utf-8") as f:
+            json.dump(list(self.bookmarks), f)
+        # Prices
+        with open("prices.json", "w", encoding="utf-8") as f:
+            json.dump(self.price_db, f)
+        # Sounds
+        self.save_sounds()
+        # Position
+        with open("mini_pos.json", "w") as f:
+            json.dump(self.mini_pos, f)
+
+    def load_sounds(self):
+        path = "drop_sounds.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.drop_sounds = data.get("rules", [])
+                    self.drop_sounds_enabled.set(data.get("enabled", True))
+                    self.default_sound_duration.set(data.get("default_dur", 5.0))
+            except: pass
+
+    def save_sounds(self):
+        data = {
+            "rules": self.drop_sounds,
+            "enabled": self.drop_sounds_enabled.get(),
+            "default_dur": self.default_sound_duration.get()
+        }
+        with open("drop_sounds.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def _animate_status_glow(self):
+        if self.worker is None:
+            return
+        
+        self.glow_val += self.glow_dir
+        if self.glow_val <= 100:
+            self.glow_val = 100
+            self.glow_dir = 8
+        elif self.glow_val >= 255:
+            self.glow_val = 255
+            self.glow_dir = -8
+            
+        color = f"#{self.glow_val:02x}{self.glow_val:02x}{self.glow_val:02x}"
+        self.live_dot.configure(fg=self.accent_color if self.glow_val > 180 else self.text_color)
+        # DYNAMIC COLOR SHIFTING LOGIC FOR THE STATUS INDICATOR TO CREATE A PULSING EFFECT
+        try:
+            # We can't easily change individual label colors in a loop without a handle
+            # but we can effect the live_dot we have:
+            hex_color = "#{:02x}{:02x}{:02x}".format(0, int(self.glow_val * 0.78), int(self.glow_val * 0.32)) # Greenish glow
+            self.live_dot.configure(fg=hex_color)
+        except: pass
+
+        try:
+            self.after(50, self._animate_status_glow)
+        except:
+            pass
 
 def main():
     app = LootMonitorApp()
