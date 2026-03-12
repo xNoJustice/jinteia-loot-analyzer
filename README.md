@@ -20,26 +20,53 @@ This is free version of loot analyzer. This is community project, so every impro
 <details>
 <summary><b>Click to see Version History</b></summary>
 
-### v1.3
-- Increased UI/UX of app.
-- Added update checker.
-- Added bottom status bar.
-- Added drop sounds.
+# 📜 Jinteia Loot Analyzer - Changelog
 
-### v1.2
-- Added portable version of app.
-- Added mini mode.
-- Added able to write price for dropped materials.
-- Added able to bookmark materials for see on top of list.
-- Added completed dungeon runs.
-- Added yang formatter.
-- Added able to see Total Net Worth and Dropped Yang.
+All notable changes to this project will be documented in this file.
 
-### v1.1
-- Increased UI/UX of app.
+---
 
-### v1.0
-- App created by Paysami.
+## 🚀 v1.3 - The "Global & Sound" Update
+
+### 🛠️ Core Improvements
+- **[Auto-Update] Update Checker:** The app now notifies you at startup if a newer version is available on GitHub.
+
+### 🎨 UI/UX Enhancements
+- **StatusBar:** Added a pulsing live status bar at the bottom to confirm the analyzer is actively watching your logs.
+- **Improved Tables:** Better alignment and readability for the item collection list.
+
+### 🔊 Audio Features
+- **Drop Sounds:** You can now set custom `.mp3` or `.wav` alerts for specific items (like Shards or Chests).
+
+---
+
+## 📦 v1.2 - Portability & Finance
+
+- **Portable EXE:** Added a standalone version that doesn't require Python installed.
+- **Mini Mode:** A compact, "always-on-top" overlay mode for gaming.
+- **Market Prices:** Added the ability to set prices for materials to calculate real-time profit.
+- **Net Worth:** Added a total valuation display (Yang + Material Value).
+- **Dungeon Tracker:** Automated "Completed Runs" counter based on chest drops.
+- **Bookmarks:** Ability to pin specific items to the top of your list.
+- **Yang Formatter:** Large Yang amounts are now formatted with dots (e.g., 1.000.000) for better readability.
+
+---
+
+## 🔧 v1.1 - UI Polishing
+
+- **Visual Tweaks:** Increased UI/UX contrast and font clarity.
+- **Performance:** Optimized log-reading speed to reduce CPU usage.
+
+---
+
+## 🎉 v1.0 - Initial Release
+
+- **Core Engine:** Real-time log monitoring.
+- **Basic Stats:** Item counting and Yang tracking.
+- **Dungeon Colors:** Unique color coding for major boss chests.
+
+---
+*Created with ❤️ by **Paysami** and the Jinteia Community.*
 </details>
 
 <img width="699" height="931" alt="image" src="https://github.com/user-attachments/assets/7991c24d-b1cd-46e1-94a3-bda56f2b800a" /> <br />
