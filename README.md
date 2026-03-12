@@ -1,8 +1,5 @@
 This is free version of loot analyzer. This is community project, so every improvement can be done by anyone.
 
-## 📜 Changelog
-Check out the [full changelog here](CHANGELOG.md) to see what's new in every version.
-
 **IF YOU DONT WANT USE EXE FILE then:**
 
 1. Press Green CODE and download as ZIP.
@@ -18,3 +15,29 @@ Check out the [full changelog here](CHANGELOG.md) to see what's new in every ver
 2. Place .exe file into Jinteia folder.
 3. Run the .exe
 4. Use ingame the white box for yangs and loot to have updates in files.
+
+## 🚀 What's New
+<details>
+<summary><b>Click to see Version History</b></summary>
+
+### v1.3
+- Increased UI/UX of app.
+- Added update checker.
+- Added bottom status bar.
+- Added drop sounds.
+
+### v1.2
+- Added portable version of app.
+- Added mini mode.
+- Added able to write price for dropped materials.
+- Added able to bookmark materials for see on top of list.
+- Added completed dungeon runs.
+- Added yang formatter.
+- Added able to see Total Net Worth and Dropped Yang.
+
+### v1.1
+- Increased UI/UX of app.
+
+### v1.0
+- App created by Paysami.
+</details>
